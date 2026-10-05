@@ -1,5 +1,6 @@
 /** Tool defs + execution for chat connectors */
 import { randomUUID } from 'crypto';
+import { guardIrreversible } from './sendGuard.js';
 import { getAdminClient } from './supabaseAdmin.js';
 import {
   getGoogleConfig,
@@ -74,6 +75,7 @@ export const SEND_EMAIL_TOOL = {
       cc: { type: 'string' },
       bcc: { type: 'string' },
       user_confirmed: { type: 'boolean', description: 'Must be true after user confirmed send' },
+      approval_token: { type: 'string', description: 'Server-issued approval for exactly these arguments (only when the app asks for it). Never invent one.' },
     },
     required: ['to', 'subject', 'body'],
   },
@@ -108,6 +110,7 @@ export const REPLY_EMAIL_TOOL = {
       cc: { type: 'string' },
       bcc: { type: 'string' },
       user_confirmed: { type: 'boolean' },
+      approval_token: { type: 'string', description: 'Server-issued approval for exactly these arguments (only when the app asks for it). Never invent one.' },
     },
     required: ['message_id', 'body'],
   },
@@ -126,6 +129,7 @@ export const FORWARD_EMAIL_TOOL = {
       cc: { type: 'string' },
       bcc: { type: 'string' },
       user_confirmed: { type: 'boolean' },
+      approval_token: { type: 'string', description: 'Server-issued approval for exactly these arguments (only when the app asks for it). Never invent one.' },
     },
     required: ['message_id', 'to'],
   },
@@ -554,15 +558,8 @@ export async function runTool(block, user, context = {}) {
       return { type: 'tool_result', tool_use_id: id, content: JSON.stringify(msg) };
     }
     if (name === 'send_email' && user) {
-      if (input.user_confirmed !== true) {
-        return {
-          type: 'tool_result',
-          tool_use_id: id,
-          is_error: true,
-          content:
-            'Send blocked: user_confirmed must be true. Confirm To/Subject/Body with the user first, then call send_email with user_confirmed=true. Prefer create_email_draft if unconfirmed.',
-        };
-      }
+      const blockedText = guardIrreversible(name, input, user);
+      if (blockedText) return { type: 'tool_result', tool_use_id: id, is_error: true, content: blockedText };
       const token = await getValidToken(user.id, 'gmail');
       if (!token) return gmailNotConnected(id);
       const result = await sendGmail(token, {
@@ -595,14 +592,8 @@ export async function runTool(block, user, context = {}) {
       };
     }
     if (name === 'reply_email' && user) {
-      if (input.user_confirmed !== true) {
-        return {
-          type: 'tool_result',
-          tool_use_id: id,
-          is_error: true,
-          content: 'Reply blocked: user_confirmed must be true. Confirm the reply with the user first.',
-        };
-      }
+      const blockedText = guardIrreversible(name, input, user);
+      if (blockedText) return { type: 'tool_result', tool_use_id: id, is_error: true, content: blockedText };
       const token = await getValidToken(user.id, 'gmail');
       if (!token) return gmailNotConnected(id);
       const result = await replyGmail(token, {
@@ -619,14 +610,8 @@ export async function runTool(block, user, context = {}) {
       };
     }
     if (name === 'forward_email' && user) {
-      if (input.user_confirmed !== true) {
-        return {
-          type: 'tool_result',
-          tool_use_id: id,
-          is_error: true,
-          content: 'Forward blocked: user_confirmed must be true. Confirm recipient with the user first.',
-        };
-      }
+      const blockedText = guardIrreversible(name, input, user);
+      if (blockedText) return { type: 'tool_result', tool_use_id: id, is_error: true, content: blockedText };
       const token = await getValidToken(user.id, 'gmail');
       if (!token) return gmailNotConnected(id);
       const result = await forwardGmail(token, {
