@@ -1,5 +1,6 @@
 import { MS_PROVIDER_SCOPES, getMicrosoftConfig, buildMicrosoftAuthUrl } from '../lib/microsoft.js';
-import { getUserFromAuthHeader } from '../lib/supabaseAdmin.js';
+import { getUserFromAuthHeader, getAdminClient } from '../lib/supabaseAdmin.js';
+import { beginFlow } from '../lib/oauthFlow.js';
 
 export default async function handler(req, res) {
   try {
@@ -7,9 +8,6 @@ export default async function handler(req, res) {
     if (!user) return res.status(401).json({ error: 'Unauthorized' });
 
     const provider = (req.query?.provider || 'outlook').toString();
-    if (!MS_PROVIDER_SCOPES[provider]) {
-      return res.status(400).json({ error: `Unknown Microsoft provider: ${provider}` });
-    }
 
     const { clientId, appUrl, tenant } = getMicrosoftConfig();
     if (!clientId || !appUrl) {
@@ -19,19 +17,16 @@ export default async function handler(req, res) {
     }
 
     const redirectUri = `${appUrl}/api/connectors/microsoft-callback`;
-    const state = Buffer.from(
-      JSON.stringify({ userId: user.id, provider, t: Date.now() })
-    ).toString('base64url');
-
-    const url = buildMicrosoftAuthUrl({
-      clientId,
-      redirectUri,
-      scopes: MS_PROVIDER_SCOPES[provider],
-      state,
-      tenant,
+    const { status, body } = await beginFlow({
+      family: 'microsoft',
+      provider,
+      user,
+      admin: getAdminClient(),
+      scopesFor: (p) => MS_PROVIDER_SCOPES[p],
+      buildUrl: (state) =>
+        buildMicrosoftAuthUrl({ clientId, redirectUri, scopes: MS_PROVIDER_SCOPES[provider], state, tenant }),
     });
-
-    return res.status(200).json({ url });
+    return res.status(status).json(body);
   } catch (e) {
     return res.status(500).json({ error: e.message || 'Failed to start Microsoft OAuth' });
   }

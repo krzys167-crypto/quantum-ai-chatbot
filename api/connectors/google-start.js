@@ -1,5 +1,6 @@
 import { PROVIDER_SCOPES, getGoogleConfig, buildAuthUrl } from '../lib/google.js';
-import { getUserFromAuthHeader } from '../lib/supabaseAdmin.js';
+import { getUserFromAuthHeader, getAdminClient } from '../lib/supabaseAdmin.js';
+import { beginFlow } from '../lib/oauthFlow.js';
 
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -14,9 +15,6 @@ export default async function handler(req, res) {
     if (!user) return res.status(401).json({ error: 'Unauthorized' });
 
     const provider = (req.query?.provider || 'gmail').toString();
-    if (!PROVIDER_SCOPES[provider]) {
-      return res.status(400).json({ error: `Unknown provider: ${provider}` });
-    }
 
     const { clientId, clientSecret, appUrl } = getGoogleConfig();
     if (!clientId || !clientSecret) {
@@ -33,18 +31,15 @@ export default async function handler(req, res) {
     }
 
     const redirectUri = `${appUrl}/api/connectors/google-callback`;
-    const state = Buffer.from(
-      JSON.stringify({ userId: user.id, provider, t: Date.now() })
-    ).toString('base64url');
-
-    const url = buildAuthUrl({
-      clientId,
-      redirectUri,
-      scopes: PROVIDER_SCOPES[provider],
-      state,
+    const { status, body } = await beginFlow({
+      family: 'google',
+      provider,
+      user,
+      admin: getAdminClient(),
+      scopesFor: (p) => PROVIDER_SCOPES[p],
+      buildUrl: (state) => buildAuthUrl({ clientId, redirectUri, scopes: PROVIDER_SCOPES[provider], state }),
     });
-
-    return res.status(200).json({ url });
+    return res.status(status).json(body);
   } catch (err) {
     console.error('google-start error:', err);
     return res.status(500).json({ error: err.message || 'Internal error' });

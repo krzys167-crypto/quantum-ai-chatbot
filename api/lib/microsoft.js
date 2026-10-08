@@ -70,7 +70,7 @@ export async function refreshMicrosoftToken({ clientId, clientSecret, refreshTok
     }),
   });
   const data = await res.json();
-  if (!res.ok) throw new Error(data.error_description || data.error || 'MS token refresh failed');
+  if (!res.ok) throw Object.assign(new Error(data.error_description || data.error || 'MS token refresh failed'), { oauthError: data.error });
   return data;
 }
 

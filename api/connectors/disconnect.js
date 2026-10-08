@@ -1,4 +1,11 @@
 import { getUserFromAuthHeader, getAdminClient } from '../lib/supabaseAdmin.js';
+import { PROVIDER_SCOPES, revokeGoogleToken } from '../lib/google.js';
+import { MS_PROVIDER_SCOPES } from '../lib/microsoft.js';
+import { disconnectFlow } from '../lib/oauthFlow.js';
+import { openToken } from '../lib/tokenCrypto.js';
+
+const googleProviders = Object.keys(PROVIDER_SCOPES);
+const familyOf = (p) => (PROVIDER_SCOPES[p] ? 'google' : MS_PROVIDER_SCOPES[p] ? 'microsoft' : null);
 
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -16,15 +23,16 @@ export default async function handler(req, res) {
     const provider = body?.provider;
     if (!provider) return res.status(400).json({ error: 'provider required' });
 
-    const admin = getAdminClient();
-    const { error } = await admin
-      .from('connectors')
-      .delete()
-      .eq('user_id', user.id)
-      .eq('provider', provider);
-
-    if (error) return res.status(500).json({ error: error.message });
-    return res.status(200).json({ ok: true });
+    const { status, body: out } = await disconnectFlow({
+      admin: getAdminClient(),
+      userId: user.id,
+      provider: String(provider),
+      familyOf,
+      googleProviders,
+      revokeGoogle: revokeGoogleToken,
+      openToken,
+    });
+    return res.status(status).json(out);
   } catch (err) {
     console.error('disconnect error:', err);
     return res.status(500).json({ error: err.message || 'Internal error' });
