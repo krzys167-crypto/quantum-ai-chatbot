@@ -43,7 +43,7 @@ states as (
 ),
 -- 5. authenticated keeps exactly what the app needs on connectors
 app as (
-  select 'authenticated_can_delete_connectors' as chk, 'true' as expected,
+  select 'authenticated_cannot_delete_connectors' as chk, 'false' as expected,
          has_table_privilege('authenticated', 'public.connectors', 'delete')::text as actual
   union all
   select 'authenticated_cannot_write_connectors', 'false',

@@ -11,14 +11,14 @@ Evidence: `npm test` (79 tests, all 20 seeded faults caught), real-PostgreSQL pr
 | F01 CRITICAL | OAuth `state` was unsigned Base64 JSON `{userId, provider}` | fixed in code | State is 32 random bytes, bound to the user **and to the browser that started the flow**, stored only as `sha256(state "." nonce)` in `oauth_states`, TTL 10 min, consumed by one atomic `UPDATE … WHERE consumed_at IS NULL AND expires_at > now() RETURNING`. User and provider come from that row, never from the URL (`api/lib/oauthState.js`, `api/lib/oauthFlow.js`). |
 | F01b HIGH | *(found by the independent review)* Login-CSRF: a state bound only to the starting **user** lets an attacker start a flow with their own session and send the provider URL to a victim; the victim's tokens would be stored under the attacker's `user_id` | fixed in code | `google-start`/`microsoft-start` set an `HttpOnly; SameSite=Lax; Secure; Path=/api/connectors` cookie holding a random nonce; the callback needs it to find the row. A foreign browser does not even find the row, so it cannot burn the real flow. |
 | F02 HIGH | Callback wrote tokens with the service role for a `userId` taken from the URL | fixed in code | Same change. A forged or legacy state is rejected before any provider call or write. |
-| F03 HIGH | Tokens in plain `text` columns; the RLS policy also let a user read their own token columns through the Data API | fixed in code + SQL (not applied) | `supabase/connectors-hardening.sql` revokes all client access to `connectors` (also from `PUBLIC`) and re-grants `SELECT` on non-token columns plus `DELETE`. Optional AES-256-GCM at rest (`CONNECTOR_TOKEN_KEY`), row-bound AAD, plaintext still readable for gradual rollout. |
+| F03 HIGH | Tokens in plain `text` columns; the RLS policy also let a user read their own token columns through the Data API | fixed in code + SQL (not applied) | `supabase/connectors-hardening.sql` revokes all client access to `connectors` (also from `PUBLIC`) and re-grants `SELECT` on non-token columns only. No `DELETE` for client roles either: disconnecting goes through `POST /api/connectors/disconnect` (service role), which revokes the provider token. Optional AES-256-GCM at rest (`CONNECTOR_TOKEN_KEY`), row-bound AAD, plaintext still readable for gradual rollout. |
 | F04 HIGH | Gmail scopes `send`, `compose`, `modify`; privacy page says "read-only" and "we do not request permission to send… or modify" | **decision needed, not changed** | See `docs/gmail-scopes.md`. A legal/product choice and a Google verification risk; no text was edited. |
 | F05 HIGH | Existing refresh token kept when reconnecting, without checking it is the same Google account | fixed in code | Kept only if the new account e-mail equals the stored one (case-insensitive). |
 | F06 MEDIUM | Microsoft callback ignored the upsert error | fixed in code | One shared flow for both providers; write errors end in `connector_error=save_failed`. |
 | F07 MEDIUM | Disconnect did not revoke at the provider | fixed for Google, limited for Microsoft | Row deleted first, then the Google token is revoked (skipped when another connector of the same Google account still shares the grant, compared case-insensitively). Microsoft v2 has no refresh-token revocation endpoint; the response says `unsupported_provider`. |
 | P6 | Refresh path | fixed in code | Rotated refresh tokens are stored (Microsoft rotates every time); `invalid_grant` marks the connector `revoked` instead of failing every call. |
 
-Not changed on purpose: CORS `*` on `google-start` and `disconnect` (calls need a Bearer token; tighten to `APP_URL` if wanted); the `grant delete` for `authenticated` (the UI could delete a row directly and skip provider revocation; the alternative is to route every disconnect through `/api/connectors/disconnect`); raw `err.message` in 500 responses outside the connector endpoints (`api/cron/notes-reminders.js`; note-tool errors go to the model, not to the client).
+Not changed on purpose: CORS `*` on `google-start` and `disconnect` (calls need a Bearer token; tighten to `APP_URL` if wanted); raw `err.message` in 500 responses outside the connector endpoints (`api/cron/notes-reminders.js`; note-tool errors go to the model, not to the client).
 
 ## Configuration (all optional; defaults keep today's behaviour)
 
@@ -40,7 +40,7 @@ Throwaway cluster, roles `anon` / `authenticated` / `service_role`, non-superuse
 | `authenticated`: `count(id) … where status = 'connected'` (admin Overview, now `select('id')`) | allowed | allowed |
 | `authenticated`: `select id, provider, account_email, status, scopes …` (what the UI uses) | allowed | allowed |
 | `authenticated`: update | RLS blocks other rows | permission denied |
-| `authenticated`: delete own row | allowed | allowed |
+| `authenticated`: delete own row | allowed | permission denied (the UI and the version on `main` already disconnect through the API; no front-end code deletes from `connectors`, checked by a test) |
 | `anon` / `authenticated`: `oauth_states` | n/a | permission denied |
 | `service_role`: write `connectors`, insert/read `oauth_states` | allowed | allowed (explicit grants) |
 | 8 connections consuming one state at once, 25 rounds | n/a | exactly one winner every round |
@@ -90,7 +90,7 @@ A reviewer who had not seen this analysis read the diff and ran it against Postg
 | 5 medium (V) | Verify script proved less than it claimed (PUBLIC grants, views, role dependence) | fixed: rewritten, negative tests above |
 | 6 medium (V) | Handler wiring untested (5 mutants survived) | fixed: handlers are now factories with fake-`req/res` tests; 20 of 20 seeded faults are caught (the thin bindings in `api/connectors/` are checked statically) |
 | 7 low | UI ignored `revoked`/`connector_error` | fixed in the UI: revoked connectors are listed under "Needs reconnecting" with a Reconnect button, `connector_error` codes show a readable message (unknown codes are shown only if they match `[A-Za-z0-9_.-]{1,64}`). Verified in Chromium against a stubbed REST call (22 checks, no real OAuth) |
-| 7b low | Client-side `DELETE` on `connectors` skips provider revocation | open (decision: move disconnect behind the API, or accept) |
+| 7b low | Client-side `DELETE` on `connectors` skips provider revocation | fixed in SQL: `DELETE` is no longer granted to `authenticated`; `verify-connectors-hardening.sql` now expects `authenticated_cannot_delete_connectors = false`. Checked on PostgreSQL 16.15 (apply twice, direct delete denied, `service_role` delete works, negative test turns the verdict to FAIL, rollback and re-apply, account deletion still cascades) |
 | 8 low (V) | No `lock_timeout` | fixed (3 s) |
 | 9 low (V) | `service_role` on `oauth_states` relied on default privileges | fixed (explicit grants) |
 | 10 low (V) | `provider=constructor` etc. passed the prototype lookup | fixed (`Object.hasOwn`), per-user rate limit on start |

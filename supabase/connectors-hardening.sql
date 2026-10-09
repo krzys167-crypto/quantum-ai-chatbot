@@ -27,6 +27,7 @@ revoke all on public.connectors from public, anon, authenticated;
 grant select, insert, update, delete on public.connectors to service_role;  -- explicit: the server writes tokens as service_role
 grant select (id, user_id, provider, account_email, status, scopes, created_at, updated_at)
   on public.connectors to authenticated;
-grant delete on public.connectors to authenticated;  -- still limited to own rows by the existing policy
+-- No DELETE for client roles either: a client-side delete would skip the provider-side token
+-- revocation. Disconnecting goes through POST /api/connectors/disconnect (service role).
 
 commit;
