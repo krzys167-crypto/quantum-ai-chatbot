@@ -89,7 +89,8 @@ A reviewer who had not seen this analysis read the diff and ran it against Postg
 | 4 medium (V/partial) | Admin Overview `select('*', {count, head})` is denied after the migration | fixed: counts `id` (PostgREST itself was not run) |
 | 5 medium (V) | Verify script proved less than it claimed (PUBLIC grants, views, role dependence) | fixed: rewritten, negative tests above |
 | 6 medium (V) | Handler wiring untested (5 mutants survived) | fixed: handlers are now factories with fake-`req/res` tests; 20 of 20 seeded faults are caught (the thin bindings in `api/connectors/` are checked statically) |
-| 7 low | UI ignores `revoked`/`connector_error`; client `DELETE` skips revocation | open (UI work / decision) |
+| 7 low | UI ignored `revoked`/`connector_error` | fixed in the UI: revoked connectors are listed under "Needs reconnecting" with a Reconnect button, `connector_error` codes show a readable message (unknown codes are shown only if they match `[A-Za-z0-9_.-]{1,64}`). Verified in Chromium against a stubbed REST call (22 checks, no real OAuth) |
+| 7b low | Client-side `DELETE` on `connectors` skips provider revocation | open (decision: move disconnect behind the API, or accept) |
 | 8 low (V) | No `lock_timeout` | fixed (3 s) |
 | 9 low (V) | `service_role` on `oauth_states` relied on default privileges | fixed (explicit grants) |
 | 10 low (V) | `provider=constructor` etc. passed the prototype lookup | fixed (`Object.hasOwn`), per-user rate limit on start |
