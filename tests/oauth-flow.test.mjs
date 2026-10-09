@@ -318,6 +318,19 @@ test('F07: local delete failure stops before revoking; revoke failure never bloc
   assert.equal(a2.tables.connectors.length, 0);
 });
 
+test('F07: a failed local delete answers with a fixed message; the database message goes to the log only', async () => {
+  const a = makeAdmin({ fail: { 'connectors.delete': true } });
+  seed(a, [{ user_id: 'u1', provider: 'gmail', account_email: 'a@x.com', access_token: 'A', refresh_token: 'R' }]);
+  const logged = [];
+  const realErr = console.error;
+  console.error = (...x) => logged.push(x.map((v) => (typeof v === 'string' ? v : JSON.stringify(v))).join(' '));
+  let out;
+  try { out = await dflow(a).run('gmail'); } finally { console.error = realErr; }
+  assert.deepEqual(out, { status: 500, body: { error: 'Could not remove connector' } });
+  assert.ok(!JSON.stringify(out).includes('injected'), 'the database message is not in the response');
+  assert.ok(logged.join('\n').includes('injected connectors.delete'), 'the database message is in the server log');
+});
+
 test('F07: Microsoft has no token revocation endpoint: disconnect says so explicitly', async () => {
   const admin = makeAdmin();
   seed(admin, [{ user_id: 'u1', provider: 'outlook', account_email: 'a@x.com', access_token: 'A', refresh_token: 'R' }]);

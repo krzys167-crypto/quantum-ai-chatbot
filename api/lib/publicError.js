@@ -38,3 +38,18 @@ export async function failUpstream(res, message, label, upstream, extra) {
   console.error(label, upstream.status, text.slice(0, 1000), extra || '');
   return res.status(502).json({ error: message });
 }
+
+/**
+ * What the chat endpoint tells the user when a turn fails. A provider status maps to a fixed sentence; the provider's
+ * response body and the message of any other exception stay in the server log (api/chat.js logs the error itself).
+ * The 401 and 429 sentences are the ones the endpoint always used.
+ */
+export function chatErrorMessage(err) {
+  const status = Number(err?.status) || 0;
+  if (status === 401) return 'AI provider auth failed. Check ANTHROPIC_API_KEY on the server.';
+  if (status === 429) return 'AI rate limit hit. Wait a moment and try again.';
+  if (status === 400 || status === 413) return 'The AI provider rejected this request. The conversation may be too long: start a new chat or shorten the message.';
+  if (status >= 500) return 'The AI provider is having trouble. Try again in a moment.';
+  if (status) return `AI provider error (${status}).`;
+  return GENERIC.server;
+}

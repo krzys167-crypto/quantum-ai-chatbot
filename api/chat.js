@@ -3,6 +3,7 @@ import { loadConnectorsAndTools, runTool } from './lib/claudeTools.js';
 import { allowRequest } from './lib/rateLimit.js';
 import { createUsageMeter } from './lib/tokenUsage.js';
 import { allowedOrigin } from './lib/cors.js';
+import { chatErrorMessage } from './lib/publicError.js';
 import { MCP_BETA, loadMcpServers, buildMcpRequest, mcpPromptLines } from './lib/mcpServers.js';
 import { selectMemory, queryFromMessages } from './lib/memoryRetrieval.js';
 
@@ -937,18 +938,12 @@ export default async function handler(req, res) {
     }
   } catch (err) {
     console.error('Handler error:', err);
-    const msg =
-      err?.status === 401
-        ? 'AI provider auth failed. Check ANTHROPIC_API_KEY on the server.'
-        : err?.status === 429
-          ? 'AI rate limit hit. Wait a moment and try again.'
-          : err?.status
-            ? `AI provider error (${err.status}). ${String(err.details || '').slice(0, 180)}`
-            : err?.message || 'Internal server error';
+    // The provider's response body (err.details) and other exceptions' messages stay in the log above.
+    const msg = chatErrorMessage(err);
     if (sseStarted || wantStream) {
       return sendSseError(res, msg);
     }
-    if (err.status) return res.status(502).json({ error: msg, status: err.status, details: err.details });
+    if (err?.status) return res.status(502).json({ error: msg, status: err.status });
     return res.status(500).json({ error: msg });
   }
 }

@@ -3,6 +3,7 @@
 // tested with injected fakes (no network, no database).
 import { createOAuthState, consumeOAuthState, setNonceCookie, readNonce } from './oauthState.js';
 import { sealToken, assertTokenConfig } from './tokenCrypto.js';
+import { dbDetail } from './publicError.js';
 
 const enc = encodeURIComponent;
 const safeCode = (v) => String(v ?? '').replace(/[^A-Za-z0-9_.-]/g, '').slice(0, 64) || 'oauth_error';
@@ -136,7 +137,10 @@ export async function disconnectFlow({ admin, userId, provider, familyOf, google
   if (!row) return { status: 200, body: { ok: true, revoked: 'none' } };
 
   const { error: delError } = await admin.from('connectors').delete().eq('user_id', userId).eq('provider', provider);
-  if (delError) return { status: 500, body: { error: delError.message } };
+  if (delError) {
+    console.error('connector delete failed:', dbDetail(delError));
+    return { status: 500, body: { error: 'Could not remove connector' } };
+  }
 
   if (family !== 'google') return { status: 200, body: { ok: true, revoked: 'unsupported_provider' } };
   if (!row.account_email) return { status: 200, body: { ok: true, revoked: 'skipped_unknown_account' } };
