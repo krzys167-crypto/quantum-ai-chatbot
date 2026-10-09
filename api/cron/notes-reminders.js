@@ -33,7 +33,7 @@ export default async function handler(req, res) {
 
   if (error) {
     console.error('notes-reminders query failed:', error);
-    return res.status(500).json({ error: error.message });
+    return res.status(500).json({ error: 'query failed' });
   }
   if (!overdue?.length) return res.status(200).json({ sent: 0, reason: 'nothing overdue' });
 

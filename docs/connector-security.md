@@ -117,3 +117,16 @@ A reviewer who had not seen this analysis read the diff and ran it against Postg
 - Live RLS, policies, default privileges, advisors and `SECURITY DEFINER` functions in production: not read (no access).
 - Real PostgREST: status codes and the `head`-count query shape are inferred; Google's revoke endpoint was not called; the Supabase SQL editor with multi-statement scripts was not run.
 - Vercel function-count limits: this change adds six files under `api/lib/` (the base already has 22 files under `api/`).
+
+## Hardening on the `extras` branch (not part of the PR #1 / PR #2 ports)
+
+| Item | What changed | Evidence | Not verified |
+|---|---|---|---|
+| F04 text | `public/privacy.html`, `home.html`, `terms.html`, README describe the scopes the code requests; scopes unchanged | `tests/policy-matches-scopes.test.mjs` (7 tests), 12 mutants killed | Google Cloud consent screen and verification status (outside the repo); legal wording |
+| Sheets formulas | Model-written `IMAGE`/`IMPORT*`/`HYPERLINK` cells are sent as text | `tests/sheet-formula-safety.test.mjs` (8 tests), 23 mutants killed; `docs/sheets-formulas.md` | Real Sheets API treatment of the leading apostrophe; undo comparison on such a cell |
+| Cron responses | `api/cron/agent-tick.js`, `notes-reminders.js` and the tick results no longer echo database or provider error text; the detail is logged and the schedule owner still sees it in `agent_runs` / `last_error` | `tests/cron-error-responses.test.mjs` (6 tests), 10 mutants killed | Vercel log retention and who can read the logs |
+| Sign-out | Pending Confirm cards are dropped when the signed-in user changes | static wiring check | Behaviour in a browser |
+
+Still open, found while doing the cron item and **not changed**: these handlers return `err.message` (or Supabase `error.message`) in the response body, so provider or database text reaches the caller. The admin ones are behind the admin check; the others are behind the user's own session. A decision is needed between generic messages and the diagnostics the UI may rely on.
+
+`api/title.js:56`, `api/suggestions.js:71`, `api/tts.js:173`, `api/stt.js:184`, `api/agents/schedules.js:16,34,55,61`, `api/connectors/mcp.js:61,77,130,139,146`, `api/admin/{users,risc-register,usage,analytics,overview,conversations,notes,connectors}.js`.

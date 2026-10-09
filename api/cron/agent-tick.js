@@ -11,6 +11,7 @@ export default async function handler(req, res) {
     return res.status(200).json(out);
   } catch (err) {
     console.error('agent-tick', err);
-    return res.status(500).json({ error: err?.message || 'tick failed' });
+    // The detail stays in the server log; the response body only says that it failed.
+    return res.status(500).json({ error: 'tick failed' });
   }
 }

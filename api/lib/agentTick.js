@@ -27,7 +27,8 @@ export async function tickDueSchedules() {
       .select('id')
       .single();
     if (runErr) {
-      results.push({ id: schedule.id, error: runErr.message });
+      console.error('agent-tick: could not record run for schedule', schedule.id, runErr.message);
+      results.push({ id: schedule.id, error: 'could not record run' });
       continue;
     }
 
@@ -64,7 +65,9 @@ export async function tickDueSchedules() {
           updated_at: now,
         })
         .eq('id', schedule.id);
-      results.push({ id: schedule.id, status: 'failed', error: message });
+      // The owner sees the full message in agent_runs / last_error; the HTTP response of the cron call does not repeat it.
+      console.error('agent-tick: schedule', schedule.id, 'failed:', message);
+      results.push({ id: schedule.id, status: 'failed', error: 'run failed' });
     }
   }
 

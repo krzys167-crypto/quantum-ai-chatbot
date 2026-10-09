@@ -254,6 +254,12 @@ export default function App() {
     return () => subscription.unsubscribe()
   }, [])
 
+  // Pending Confirm cards carry the text of mails and events and belong to the account that was signed in when they were
+  // created. Drop them whenever the signed-in user changes, sign-out included (a token refresh keeps the same id), so the
+  // next person using this browser never sees them. The server rejects another user's approval id anyway.
+  const sessionUserId = session?.user?.id
+  useEffect(() => { setApprovals([]) }, [sessionUserId])
+
   const user = session?.user
   const firstName =
     user?.user_metadata?.preferred_name ||
