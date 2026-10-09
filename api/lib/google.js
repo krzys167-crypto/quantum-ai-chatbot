@@ -84,7 +84,7 @@ export async function exchangeCode({ clientId, clientSecret, code, redirectUri }
     }),
   });
   const data = await res.json();
-  if (!res.ok) throw new Error(data.error_description || data.error || 'Token exchange failed');
+  if (!res.ok) throw Object.assign(new Error(data.error_description || data.error || 'Token exchange failed'), { oauthError: data.error });
   return data;
 }
 
@@ -100,8 +100,20 @@ export async function refreshAccessToken({ clientId, clientSecret, refreshToken 
     }),
   });
   const data = await res.json();
-  if (!res.ok) throw new Error(data.error_description || data.error || 'Token refresh failed');
+  if (!res.ok) throw Object.assign(new Error(data.error_description || data.error || 'Token refresh failed'), { oauthError: data.error });
   return data;
+}
+
+/** Revoke a Google token (token in the body, never in the URL). true = revoked or already invalid. */
+export async function revokeGoogleToken(token) {
+  const res = await fetch('https://oauth2.googleapis.com/revoke', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ token }),
+  });
+  if (res.ok) return true;
+  const data = await res.json().catch(() => ({}));
+  return data.error === 'invalid_token';
 }
 
 export async function getGoogleEmail(accessToken) {

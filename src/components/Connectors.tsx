@@ -23,6 +23,26 @@ type Props = {
   onClose?: () => void
 }
 
+// Codes the connect callbacks redirect back with (?connector_error=...). Anything else is shown generically: the value
+// comes from the URL, so it is never displayed verbatim unless it has the harmless shape of a provider error code.
+const CONNECTOR_ERRORS: Record<string, string> = {
+  access_denied: 'Connection cancelled. Nothing was connected.',
+  missing_code: 'The provider did not return an authorization code. Please try again.',
+  invalid_state: 'This connection link is no longer valid (expired, already used, or started in another browser). Please start again from this page.',
+  state_store_unavailable: 'Connecting is temporarily unavailable. Please try again later.',
+  exchange_failed: 'The provider refused the connection. Please try again.',
+  save_failed: 'The connection could not be saved. Please try again.',
+  token_key_invalid: 'Connecting is temporarily unavailable (server configuration). Please try again later.',
+  callback_failed: 'Something went wrong while connecting. Please try again.',
+}
+
+export function connectorErrorMessage(code: string): string {
+  if (Object.prototype.hasOwnProperty.call(CONNECTOR_ERRORS, code)) return CONNECTOR_ERRORS[code]
+  return /^[A-Za-z0-9_.-]{1,64}$/.test(code)
+    ? `The connection did not complete (${code}). Nothing was connected.`
+    : 'The connection did not complete. Nothing was connected.'
+}
+
 const BRAND: Record<string, React.ReactNode> = {
   gmail: <GmailIcon size={22} />,
   google_drive: <DriveIcon size={22} />,
@@ -72,7 +92,7 @@ export default function Connectors({ accessToken, onClose }: Props) {
         .from('connectors')
         .select('id, user_id, provider, account_email, status, scopes, created_at, updated_at')
         .eq('user_id', uid)
-        .eq('status', 'connected')
+        .in('status', ['connected', 'revoked'])
       if (err) {
         setError(err.message || 'Failed to load connectors')
         setConnectors([])
@@ -158,12 +178,14 @@ export default function Connectors({ accessToken, onClose }: Props) {
     loadMcp()
     const params = new URLSearchParams(window.location.search)
     const connected = params.get('connected')
-    if (connected || params.get('connector_error')) {
+    const connectorError = params.get('connector_error')
+    if (connected || connectorError) {
       load()
       if (connected) {
         setJustConnected(connected)
         setTimeout(() => setJustConnected(null), 2200)
       }
+      if (connectorError) setError(connectorErrorMessage(connectorError))
       const url = new URL(window.location.href)
       url.searchParams.delete('connected')
       url.searchParams.delete('connector_error')
@@ -173,6 +195,9 @@ export default function Connectors({ accessToken, onClose }: Props) {
 
   const getConnected = (provider: string) =>
     connectors.find((c) => c.provider === provider && c.status === 'connected')
+  // The provider revoked the grant (or the refresh token no longer works): the app keeps the row so it can say so.
+  const getRevoked = (provider: string) =>
+    connectors.find((c) => c.provider === provider && c.status === 'revoked')
 
   const connect = async (provider: string) => {
     setError(null)
@@ -219,7 +244,8 @@ export default function Connectors({ accessToken, onClose }: Props) {
 
   const available = CONNECTOR_CATALOG.filter((c) => c.available)
   const connectedList = available.filter((c) => getConnected(c.provider))
-  const suggestedList = available.filter((c) => !getConnected(c.provider))
+  const reconnectList = available.filter((c) => !getConnected(c.provider) && getRevoked(c.provider))
+  const suggestedList = available.filter((c) => !getConnected(c.provider) && !getRevoked(c.provider))
 
   const selectedItem = selected
     ? available.find((c) => c.provider === selected)
@@ -348,6 +374,43 @@ export default function Connectors({ accessToken, onClose }: Props) {
               </div>
             )}
 
+            {reconnectList.length > 0 && (
+              <div data-testid="reconnect-section">
+                <p className={`text-[13px] font-medium px-1 mb-2 ${textMuted}`}>Needs reconnecting</p>
+                <div className={`rounded-[20px] overflow-hidden ${card}`}>
+                  {reconnectList.map((item, i) => {
+                    const isBusy = busy === item.provider
+                    return (
+                      <div
+                        key={item.provider}
+                        className={`flex items-center gap-3.5 px-3.5 py-[14px] ${
+                          i < reconnectList.length - 1 ? `border-b ${rowBorder}` : ''
+                        }`}
+                      >
+                        <div className={`w-10 h-10 rounded-[12px] flex items-center justify-center shrink-0 ${iconBg}`}>
+                          {BRAND[item.provider]}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className={`text-[16px] font-medium ${textMain}`}>{item.name}</p>
+                          <p className="text-[12.5px] leading-snug text-destructive">
+                            Access was revoked or expired. Reconnect to use it again.
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => connect(item.provider)}
+                          disabled={isBusy}
+                          className="shrink-0 h-[30px] px-3.5 rounded-full text-[13px] font-medium transition disabled:opacity-50 bg-secondary text-foreground active:bg-accent"
+                        >
+                          {isBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : 'Reconnect'}
+                        </button>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            )}
+
             {suggestedList.length > 0 && (
               <div>
                 <p className={`text-[13px] font-medium px-1 mb-2 ${textMuted}`}>Suggested</p>
@@ -390,7 +453,7 @@ export default function Connectors({ accessToken, onClose }: Props) {
               </div>
             )}
 
-            {connectedList.length === 0 && suggestedList.length === 0 && (
+            {connectedList.length === 0 && reconnectList.length === 0 && suggestedList.length === 0 && (
               <p className={`text-center py-12 text-[15px] ${textMuted}`}>No connectors available</p>
             )}
 

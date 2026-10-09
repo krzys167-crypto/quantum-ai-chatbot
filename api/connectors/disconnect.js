@@ -1,34 +1,14 @@
 import { getUserFromAuthHeader, getAdminClient } from '../lib/supabaseAdmin.js';
-import { allowedOrigin } from '../lib/cors.js';
+import { PROVIDER_SCOPES, revokeGoogleToken } from '../lib/google.js';
+import { MS_PROVIDER_SCOPES } from '../lib/microsoft.js';
+import { openToken } from '../lib/tokenCrypto.js';
+import { makeDisconnectHandler } from '../lib/connectorHandlers.js';
 
-export default async function handler(req, res) {
-  res.setHeader('Access-Control-Allow-Origin', allowedOrigin());
-  res.setHeader('Vary', 'Origin');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-
-  if (req.method === 'OPTIONS') return res.status(200).end();
-  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
-
-  try {
-    const user = await getUserFromAuthHeader(req);
-    if (!user) return res.status(401).json({ error: 'Unauthorized' });
-
-    const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
-    const provider = body?.provider;
-    if (!provider) return res.status(400).json({ error: 'provider required' });
-
-    const admin = getAdminClient();
-    const { error } = await admin
-      .from('connectors')
-      .delete()
-      .eq('user_id', user.id)
-      .eq('provider', provider);
-
-    if (error) return res.status(500).json({ error: error.message });
-    return res.status(200).json({ ok: true });
-  } catch (err) {
-    console.error('disconnect error:', err);
-    return res.status(500).json({ error: err.message || 'Internal error' });
-  }
-}
+export default makeDisconnectHandler({
+  getUser: getUserFromAuthHeader,
+  getAdmin: getAdminClient,
+  scopesByFamily: { google: PROVIDER_SCOPES, microsoft: MS_PROVIDER_SCOPES },
+  googleProviders: Object.keys(PROVIDER_SCOPES),
+  revokeGoogle: revokeGoogleToken,
+  openToken,
+});

@@ -19,6 +19,8 @@ Run the conversations/messages SQL from the earlier setup (or see git history).
 
 ### 2. Supabase — Connectors table
 
+> After this step also run `supabase/connectors-hardening.sql` (OAuth state table + token column privileges). See `docs/connector-security.md`; the OAuth connect flow fails closed until it is applied.
+
 **SQL Editor → New query → run** `supabase/connectors.sql` (also below):
 
 ```sql

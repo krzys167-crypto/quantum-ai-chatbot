@@ -1,0 +1,33 @@
+-- Connector hardening: F01/F02 (server-side OAuth state) and F03 (tokens not readable
+-- through the Data API). Idempotent. NOT applied automatically: review, then run in the
+-- SQL editor of the project that actually serves production. Rollback: connectors-hardening-rollback.sql
+begin;
+-- Fail fast instead of queueing behind a long transaction (first run adds an FK to auth.users).
+set local lock_timeout = '3s';
+
+-- 1. OAuth state: single use, short TTL, bound to the user who started the flow.
+--    Only the service role (bypasses RLS) ever touches it; no policies on purpose.
+create table if not exists public.oauth_states (
+  state_hash  text primary key,                       -- sha256(state); the raw state is never stored
+  user_id     uuid not null references auth.users(id) on delete cascade,
+  provider    text not null,
+  family      text not null check (family in ('google', 'microsoft')),
+  created_at  timestamptz not null default now(),
+  expires_at  timestamptz not null,
+  consumed_at timestamptz
+);
+create index if not exists oauth_states_expires_at_idx on public.oauth_states (expires_at);
+alter table public.oauth_states enable row level security;
+revoke all on public.oauth_states from public, anon, authenticated;
+grant select, insert, update, delete on public.oauth_states to service_role;  -- explicit: do not rely on default privileges
+
+-- 2. Tokens must not be readable by client roles, even for the owner's own rows.
+--    The app reads connector status through explicit columns only (Connectors.tsx).
+revoke all on public.connectors from public, anon, authenticated;
+grant select, insert, update, delete on public.connectors to service_role;  -- explicit: the server writes tokens as service_role
+grant select (id, user_id, provider, account_email, status, scopes, created_at, updated_at)
+  on public.connectors to authenticated;
+-- No DELETE for client roles either: a client-side delete would skip the provider-side token
+-- revocation. Disconnecting goes through POST /api/connectors/disconnect (service role).
+
+commit;

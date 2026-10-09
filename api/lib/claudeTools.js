@@ -1,6 +1,7 @@
 /** Tool defs + execution for chat connectors */
 import { randomUUID } from 'crypto';
 import { getAdminClient } from './supabaseAdmin.js';
+import { getValidConnectorToken } from './connectorTokens.js';
 import {
   getGoogleConfig,
   refreshAccessToken,
@@ -700,73 +701,26 @@ async function isConnectorActive(userId, provider) {
 }
 
 export async function getValidToken(userId, provider) {
-  const admin = getAdminClient();
-  const { data: connector } = await admin
-    .from('connectors')
-    .select('*')
-    .eq('user_id', userId)
-    .eq('provider', provider)
-    .eq('status', 'connected')
-    .maybeSingle();
-  if (!connector?.access_token) return null;
-  const expires = connector.token_expires_at ? new Date(connector.token_expires_at).getTime() : 0;
-  const needsRefresh = !expires || expires < Date.now() + 60_000;
-  if (!needsRefresh) return connector.access_token;
-  if (!connector.refresh_token) return connector.access_token;
   const { clientId, clientSecret } = getGoogleConfig();
-  const refreshed = await refreshAccessToken({
-    clientId,
-    clientSecret,
-    refreshToken: connector.refresh_token,
+  return getValidConnectorToken({
+    admin: getAdminClient(),
+    userId,
+    provider,
+    refresh: (refreshToken) => refreshAccessToken({ clientId, clientSecret, refreshToken }),
   });
-  const tokenExpiresAt = refreshed.expires_in
-    ? new Date(Date.now() + refreshed.expires_in * 1000).toISOString()
-    : null;
-  await admin
-    .from('connectors')
-    .update({
-      access_token: refreshed.access_token,
-      token_expires_at: tokenExpiresAt,
-      updated_at: new Date().toISOString(),
-    })
-    .eq('id', connector.id);
-  return refreshed.access_token;
 }
 
 export async function getValidMicrosoftToken(userId, provider) {
-  const admin = getAdminClient();
-  const { data: connector } = await admin
-    .from('connectors')
-    .select('*')
-    .eq('user_id', userId)
-    .eq('provider', provider)
-    .eq('status', 'connected')
-    .maybeSingle();
-  if (!connector?.access_token) return null;
-  const expires = connector.token_expires_at ? new Date(connector.token_expires_at).getTime() : 0;
-  const needsRefresh = !expires || expires < Date.now() + 60_000;
-  if (!needsRefresh) return connector.access_token;
-  if (!connector.refresh_token) return connector.access_token;
   const { clientId, clientSecret, tenant } = getMicrosoftConfig();
-  if (!clientId || !clientSecret) return connector.access_token;
-  const refreshed = await refreshMicrosoftToken({
-    clientId,
-    clientSecret,
-    refreshToken: connector.refresh_token,
-    tenant,
+  return getValidConnectorToken({
+    admin: getAdminClient(),
+    userId,
+    provider,
+    refresh:
+      clientId && clientSecret
+        ? (refreshToken) => refreshMicrosoftToken({ clientId, clientSecret, refreshToken, tenant })
+        : null,
   });
-  const tokenExpiresAt = refreshed.expires_in
-    ? new Date(Date.now() + refreshed.expires_in * 1000).toISOString()
-    : null;
-  await admin
-    .from('connectors')
-    .update({
-      access_token: refreshed.access_token,
-      token_expires_at: tokenExpiresAt,
-      updated_at: new Date().toISOString(),
-    })
-    .eq('id', connector.id);
-  return refreshed.access_token;
 }
 
 function gmailNotConnected(id) {
