@@ -8,6 +8,7 @@
 import { getUserFromAuthHeader } from './lib/supabaseAdmin.js';
 import { allowRequest } from './lib/rateLimit.js';
 import { allowedOrigin } from './lib/cors.js';
+import { GENERIC, fail, failUpstream } from './lib/publicError.js';
 
 // Read-aloud chunks a reply into ~380-char pieces and prefetches ahead, so
 // this needs headroom above chat's limit for a burst of legitimate use.
@@ -131,17 +132,7 @@ export default async function handler(req, res) {
       elRes = await speak(fallbackModelId);
     }
 
-    if (!elRes.ok) {
-      const errText = await elRes.text().catch(() => '');
-      console.error('ElevenLabs TTS error', elRes.status, errText, { voiceId, modelId: usedModel });
-      return res.status(502).json({
-        error: 'ElevenLabs TTS failed',
-        status: elRes.status,
-        details: errText.slice(0, 500),
-        voiceId,
-        modelId: usedModel,
-      });
-    }
+    if (!elRes.ok) return failUpstream(res, GENERIC.tts, 'ElevenLabs TTS error', elRes, { voiceId, modelId: usedModel });
 
     res.setHeader('Content-Type', 'audio/mpeg');
     res.setHeader('Cache-Control', 'no-store');
@@ -169,7 +160,6 @@ export default async function handler(req, res) {
     res.setHeader('Content-Length', audioBuf.length);
     return res.status(200).send(audioBuf);
   } catch (err) {
-    console.error('TTS handler error:', err);
-    return res.status(500).json({ error: 'Internal server error', message: err?.message || String(err) });
+    return fail(res, GENERIC.server, 'TTS handler error:', err);
   }
 }

@@ -2,6 +2,7 @@ import { getUserFromAuthHeader } from './lib/supabaseAdmin.js';
 import { allowRequest } from './lib/rateLimit.js';
 import { recordUsage } from './lib/tokenUsage.js';
 import { allowedOrigin } from './lib/cors.js';
+import { GENERIC, fail, failUpstream } from './lib/publicError.js';
 
 // Fires after most replies, so it is the one auxiliary call whose model choice
 // shows up on the bill. Three short follow-up prompts do not need Sonnet.
@@ -41,10 +42,7 @@ export default async function handler(req, res) {
         ],
       }),
     });
-    if (!response.ok) {
-      const errorText = await response.text();
-      return res.status(502).json({ error: `AI provider error (${response.status})`, details: errorText.slice(0, 180) });
-    }
+    if (!response.ok) return failUpstream(res, GENERIC.provider, 'Suggestions provider error:', response);
     const data = await response.json();
     await recordUsage({ userId: user.id, endpoint: 'suggestions', model: MODEL, usage: data.usage });
     const raw = (data.content || [])
@@ -67,7 +65,6 @@ export default async function handler(req, res) {
     }
     return res.status(200).json({ suggestions });
   } catch (err) {
-    console.error('Suggestions handler error:', err);
-    return res.status(500).json({ error: err?.message || 'Internal server error' });
+    return fail(res, GENERIC.server, 'Suggestions handler error:', err);
   }
 }

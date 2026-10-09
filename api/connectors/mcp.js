@@ -21,6 +21,7 @@ import {
   nameFromUrl,
   MAX_SERVERS_PER_USER,
 } from '../lib/mcpServers.js';
+import { GENERIC, fail, dbDetail } from '../lib/publicError.js';
 
 const RATE_LIMIT = 30;
 const RATE_WINDOW_MS = 60_000;
@@ -58,7 +59,7 @@ export default async function handler(req, res) {
         // Before the migration is run this should read as "none connected",
         // not as a broken settings page.
         if (tableMissing(error)) return res.status(200).json({ servers: [], not_installed: true });
-        return res.status(500).json({ error: error.message });
+        return fail(res, GENERIC.db, 'mcp_servers list failed:', dbDetail(error));
       }
       return res.status(200).json({ servers: data || [] });
     }
@@ -74,7 +75,7 @@ export default async function handler(req, res) {
           .update({ enabled: body.enabled, updated_at: new Date().toISOString() })
           .eq('id', body.id)
           .eq('user_id', user.id);
-        if (error) return res.status(500).json({ error: error.message });
+        if (error) return fail(res, GENERIC.db, 'mcp_servers toggle failed:', dbDetail(error));
         return res.status(200).json({ ok: true, id: body.id, enabled: body.enabled });
       }
 
@@ -127,7 +128,7 @@ export default async function handler(req, res) {
             error: 'MCP servers are not set up on this database yet. Run supabase/mcp-servers.sql.',
           });
         }
-        return res.status(500).json({ error: error.message });
+        return fail(res, GENERIC.db, 'mcp_servers upsert failed:', dbDetail(error));
       }
       return res.status(200).json({ server: data });
     }
@@ -136,13 +137,12 @@ export default async function handler(req, res) {
       const id = req.query?.id || (typeof req.body === 'object' ? req.body?.id : null);
       if (!id) return res.status(400).json({ error: 'id is required' });
       const { error } = await admin.from('mcp_servers').delete().eq('id', String(id)).eq('user_id', user.id);
-      if (error) return res.status(500).json({ error: error.message });
+      if (error) return fail(res, GENERIC.db, 'mcp_servers delete failed:', dbDetail(error));
       return res.status(200).json({ ok: true });
     }
 
     return res.status(405).json({ error: 'Method not allowed' });
   } catch (err) {
-    console.error('mcp connector error:', err);
-    return res.status(500).json({ error: err?.message || 'Internal error' });
+    return fail(res, GENERIC.server, 'mcp connector error:', err);
   }
 }

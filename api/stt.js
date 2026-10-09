@@ -8,6 +8,7 @@ import { getUserFromAuthHeader } from './lib/supabaseAdmin.js';
 import { allowRequest } from './lib/rateLimit.js';
 import { wordsToNumbers } from './lib/numberWords.js';
 import { allowedOrigin } from './lib/cors.js';
+import { GENERIC, fail, failUpstream } from './lib/publicError.js';
 
 const RATE_LIMIT = 20;
 const RATE_WINDOW_MS = 60_000;
@@ -132,15 +133,7 @@ export default async function handler(req, res) {
       body: form,
     });
 
-    if (!elRes.ok) {
-      const errText = await elRes.text().catch(() => '');
-      console.error('ElevenLabs STT error', elRes.status, errText);
-      return res.status(502).json({
-        error: 'ElevenLabs STT failed',
-        status: elRes.status,
-        details: errText.slice(0, 500),
-      });
-    }
+    if (!elRes.ok) return failUpstream(res, GENERIC.stt, 'ElevenLabs STT error', elRes);
 
     const data = await elRes.json();
 
@@ -180,7 +173,6 @@ export default async function handler(req, res) {
       words: data?.words || undefined,
     });
   } catch (err) {
-    console.error('STT handler error:', err);
-    return res.status(500).json({ error: 'Internal server error', message: err?.message || String(err) });
+    return fail(res, GENERIC.server, 'STT handler error:', err);
   }
 }

@@ -1,5 +1,6 @@
 import { getAdminClient, getUserFromAuthHeader } from '../lib/supabaseAdmin.js';
 import { applyCors } from '../lib/cors.js';
+import { GENERIC, fail, dbDetail } from '../lib/publicError.js';
 
 export default async function handler(req, res) {
   if (applyCors(req, res, 'GET, POST, PATCH, DELETE, OPTIONS')) return;
@@ -13,7 +14,7 @@ export default async function handler(req, res) {
       .select('*')
       .eq('user_id', user.id)
       .order('created_at', { ascending: false });
-    if (error) return res.status(500).json({ error: error.message });
+    if (error) return fail(res, GENERIC.db, 'agent_schedules list failed:', dbDetail(error));
     return res.status(200).json({ schedules: data || [] });
   }
 
@@ -31,7 +32,7 @@ export default async function handler(req, res) {
       config: body.config || { query: 'in:inbox newer_than:1d', max_messages: 20 },
     };
     const { data, error } = await admin.from('agent_schedules').insert(row).select('*').single();
-    if (error) return res.status(500).json({ error: error.message });
+    if (error) return fail(res, GENERIC.db, 'agent_schedules insert failed:', dbDetail(error));
     return res.status(201).json({ schedule: data });
   }
 
@@ -52,13 +53,13 @@ export default async function handler(req, res) {
       .eq('user_id', user.id)
       .select('*')
       .single();
-    if (error) return res.status(500).json({ error: error.message });
+    if (error) return fail(res, GENERIC.db, 'agent_schedules update failed:', dbDetail(error));
     return res.status(200).json({ schedule: data });
   }
 
   if (req.method === 'DELETE') {
     const { error } = await admin.from('agent_schedules').delete().eq('id', id).eq('user_id', user.id);
-    if (error) return res.status(500).json({ error: error.message });
+    if (error) return fail(res, GENERIC.db, 'agent_schedules delete failed:', dbDetail(error));
     return res.status(200).json({ ok: true });
   }
 

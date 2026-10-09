@@ -2,6 +2,7 @@ import { getUserFromAuthHeader } from './lib/supabaseAdmin.js';
 import { allowRequest } from './lib/rateLimit.js';
 import { recordUsage } from './lib/tokenUsage.js';
 import { allowedOrigin } from './lib/cors.js';
+import { GENERIC, fail, failUpstream } from './lib/publicError.js';
 
 // Naming a chat in six words is not work that repays a frontier model, and this
 // fires once per conversation on the user's first exchange.
@@ -39,10 +40,7 @@ export default async function handler(req, res) {
         messages: [{ role: 'user', content: `User: ${userText}\n\nAssistant: ${assistantText}` }],
       }),
     });
-    if (!response.ok) {
-      const errorText = await response.text();
-      return res.status(502).json({ error: `AI provider error (${response.status})`, details: errorText.slice(0, 180) });
-    }
+    if (!response.ok) return failUpstream(res, GENERIC.provider, 'Title provider error:', response);
     const data = await response.json();
     await recordUsage({ userId: user.id, endpoint: 'title', model: MODEL, usage: data.usage });
     const title = (data.content || [])
@@ -52,7 +50,6 @@ export default async function handler(req, res) {
       .trim();
     return res.status(200).json({ title: title || null });
   } catch (err) {
-    console.error('Title handler error:', err);
-    return res.status(500).json({ error: err?.message || 'Internal server error' });
+    return fail(res, GENERIC.server, 'Title handler error:', err);
   }
 }
