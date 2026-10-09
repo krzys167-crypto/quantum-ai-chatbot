@@ -28,14 +28,15 @@ test('server mode (default): send_email with a forged confirmation files a pendi
   assert.deepEqual(net, [], 'no Gmail (or any other) request was made');
 });
 
-test('server mode: reply and forward are gated the same way (card still shown if the original cannot be loaded)', async () => {
-  for (const [name, input] of [['reply_email', { message_id: 'm1', body: 'ok', user_confirmed: true }], ['forward_email', { message_id: 'm1', to: 'x@y.z', user_confirmed: true }]]) {
+test('server mode: reply and forward without a readable original create no card and send nothing', async () => {
+  for (const [name, input] of [['reply_email', { message_id: 'm1', body: 'ok', user_confirmed: true }], ['forward_email', { message_id: 'm1', to: 'x@y.zz', user_confirmed: true }]]) {
     const admin = makeApprovalDb();
     const cards = [];
     const out = await call(name, input, { admin, onApprovalRequired: (c) => cards.push(c) });
-    assert.match(out.content, /NOT SENT YET/, name);
-    assert.equal(cards.length, 1, name);
-    assert.equal(cards[0].action, name);
+    assert.equal(out.is_error, true, name);
+    assert.match(out.content, /original message could not be read/, name);
+    assert.equal(cards.length, 0, name);
+    assert.equal(admin.tables.approval_requests.length, 0, name);
     assert.ok(!net.some((u) => /\/messages\/send/.test(u)), `${name} must not send`);
   }
 });
@@ -52,10 +53,10 @@ test('legacy mode without the model flag is still blocked, with the flag it proc
   assert.equal(blocked.is_error, true);
   assert.match(blocked.content, /user_confirmed must be true/);
   // With the flag the code goes on to look up the connector (needs the real database, absent here): it is not gated.
-  await assert.rejects(
-    call('send_email', { to: 'x@y.z', subject: 's', body: 'b', user_confirmed: true }, { admin: makeApprovalDb() }),
-    /Missing SUPABASE_URL/,
-  );
+  const proceeded = await call('send_email', { to: 'x@y.zz', subject: 's', body: 'b', user_confirmed: true }, { admin: makeApprovalDb() });
+  assert.equal(proceeded.is_error, true);
+  assert.match(proceeded.content, /Missing SUPABASE_URL/, 'it went past the gate and failed on the connector lookup');
+  assert.ok(!/blocked|NOT SENT YET/.test(proceeded.content));
 });
 
 test('tool schemas no longer offer a model-held approval token and tell the model it cannot send', () => {

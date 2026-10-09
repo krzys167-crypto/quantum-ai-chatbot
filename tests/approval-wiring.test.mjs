@@ -17,7 +17,9 @@ test('tool schemas no longer accept an approval token and state that only the ap
   const src = read('api/lib/claudeTools.js');
   assert.ok(!/approval_token/.test(src));
   assert.match(src, /Ignored by the app: only the user pressing Confirm sends\./);
-  assert.match(src, /import \{ gateIrreversible \} from '\.\/sendGuard\.js'/);
+  assert.match(src, /import \{ gateIrreversible, PROCEED \} from '\.\/sendGuard\.js'/);
+  assert.ok((src.match(/if \(gate !== PROCEED\) return \{/g) || []).length >= 2, 'both gated branches must proceed only on the explicit PROCEED value');
+  assert.ok(!/if \(gate\) return/.test(src), 'no truthiness test on the gate result (fail-open shape)');
   assert.match(src, /gateIrreversible\(name, input, user, \{[\s\S]*?onApprovalRequired: context\.onApprovalRequired/);
 });
 
@@ -60,4 +62,18 @@ test('the SQL constraint and the code list the same approvable actions', async (
   assert.ok(m, 'named check constraint present');
   const listed = [...m[1].matchAll(/'([a-z_]+)'/g)].map((x) => x[1]).sort();
   assert.deepEqual(listed, [...APPROVABLE_ACTIONS].sort());
+});
+
+test('Confirm card: shows who really receives a reply, Cc and Bcc, and only a click can approve', () => {
+  const src = read('src/components/ApprovalTray.tsx');
+  assert.match(src, /isReply && <Row dark=\{dark\} label="To" value=\{rcpt\?\.to \?/, 'the reply recipient comes from the server-resolved context');
+  assert.match(src, /label="Cc" value=\{isReply \? text\(rcpt\?\.cc \?\? f\.cc\)/);
+  assert.match(src, /label="Bcc" value=\{isReply \? text\(rcpt\?\.bcc \?\? f\.bcc\)/);
+  assert.match(src, /Unknown - do not confirm/, 'a reply card without recipients warns instead of looking normal');
+  const calls = src.match(/\bdecide\(/g) || [];
+  const clicks = src.match(/onClick=\{\(\) => void decide\(c, '(approve|reject)'\)\}/g) || [];
+  assert.equal(calls.length, clicks.length, 'decide() is only ever called from a click handler');
+  assert.equal(clicks.length, 2);
+  assert.equal((src.match(/fetch\(/g) || []).length, 1, 'one network call, inside decide()');
+  assert.match(src, /lineCount\(bodyText\)/, 'the card states how long the message is, so a hidden tail is visible');
 });

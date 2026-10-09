@@ -9,6 +9,12 @@
 //                                      switch; it is not the default.
 import { APPROVABLE_ACTIONS, attendeeEntries, createPending, normalizeArgs } from './approvals.js';
 
+/** The only value that lets the caller run the action itself. Anything else (null, undefined, a typo) is a block. */
+export const PROCEED = Object.freeze({ proceed: true });
+// A reply or a forward goes to people read from a received message. The card must show them, so without a readable
+// original there is no card and nothing is sent.
+const NEEDS_ORIGINAL = new Set(['reply_email', 'forward_email']);
+
 export function approvalMode(env = process.env) {
   const raw = String(env.APPROVAL_MODE || 'server').trim().toLowerCase();
   return raw === 'server' ? 'server' : raw === 'legacy' ? 'legacy' : 'invalid';
@@ -38,7 +44,7 @@ const REASON_TEXT = {
 };
 
 /**
- * Returns null when the action may proceed right now (legacy mode with the model's flag, or a calendar event without
+ * Returns PROCEED when the action may proceed right now (legacy mode with the model's flag, or a calendar event without
  * guests, which has no third-party effect), otherwise
  * { content, is_error } to hand back to the model as the tool result.
  *   ctx.admin               Supabase service client
@@ -46,9 +52,9 @@ const REASON_TEXT = {
  *   ctx.describe            async () => object|null : best-effort context for the card (e.g. the message being replied to)
  */
 export async function gateIrreversible(name, input, user, ctx = {}) {
-  if (!APPROVABLE_ACTIONS.includes(name)) return null;
+  if (!APPROVABLE_ACTIONS.includes(name)) return PROCEED;
   // An event for the user alone has no third-party effect: it stays immediate. Guests make it approvable.
-  if (name === 'create_calendar_event' && attendeeEntries(input).length === 0) return null;
+  if (name === 'create_calendar_event' && attendeeEntries(input).length === 0) return PROCEED;
   const env = ctx.env || process.env;
   const log = ctx.log || console;
   const mode = approvalMode(env);
@@ -57,11 +63,11 @@ export async function gateIrreversible(name, input, user, ctx = {}) {
   if (mode === 'legacy') {
     if (name === 'create_calendar_event') {
       log.warn?.(`[approval] APPROVAL_MODE=legacy: ${name} with guests released without approval (F09 open)`);
-      return null;
+      return PROCEED;
     }
     if (input && input.user_confirmed === true) {
       log.warn?.(`[approval] APPROVAL_MODE=legacy: ${name} released on the model's own flag (F09 open)`);
-      return null;
+      return PROCEED;
     }
     return blocked(LEGACY_TEXT[name]);
   }
@@ -70,15 +76,27 @@ export async function gateIrreversible(name, input, user, ctx = {}) {
   if (typeof ctx.onApprovalRequired !== 'function') {
     return blocked(NO_CARD_TEXT(name));
   }
+  let normalized;
+  try {
+    normalized = normalizeArgs(name, input);
+  } catch (e) {
+    return blocked(`${name} blocked: ${e.message}.`);
+  }
+  let extra = null;
+  if (NEEDS_ORIGINAL.has(name)) {
+    try { extra = (await ctx.describe?.(normalized)) || null; } catch { extra = null; }
+    if (!extra) return blocked(`${name} blocked: the original message could not be read, so no Confirm card was created and nothing was sent. Try again in a moment.`);
+  }
   let pending;
   try {
-    pending = await createPending({ admin: ctx.admin, userId: user.id, action: name, args: input, now: ctx.now });
+    pending = await createPending({ admin: ctx.admin, userId: user.id, action: name, args: normalized, now: ctx.now });
   } catch (e) {
     if (e?.code === 'invalid_args') return blocked(`${name} blocked: ${e.message}.`);
     return blocked(`${name} ${REASON_TEXT[e?.code] || REASON_TEXT.approval_store_unavailable}`);
   }
-  let extra = null;
-  try { extra = (await ctx.describe?.(pending.args)) || null; } catch { /* the card still shows the exact fields */ }
+  if (!NEEDS_ORIGINAL.has(name)) {
+    try { extra = (await ctx.describe?.(pending.args)) || null; } catch { /* the card still shows the exact fields */ }
+  }
   try {
     ctx.onApprovalRequired({
       id: pending.id,

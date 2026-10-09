@@ -1,6 +1,6 @@
 /** Tool defs + execution for chat connectors */
 import { randomUUID } from 'crypto';
-import { gateIrreversible } from './sendGuard.js';
+import { gateIrreversible, PROCEED } from './sendGuard.js';
 import { getAdminClient } from './supabaseAdmin.js';
 import {
   getGoogleConfig,
@@ -23,6 +23,7 @@ import {
 } from './google.js';
 import {
   replyGmail,
+  replyRecipients,
   forwardGmail,
   listGmailLabels,
   batchModifyGmail,
@@ -529,13 +530,20 @@ async function resolveProjectByName(admin, userId, name) {
   return data || null;
 }
 
-/** Best-effort context for a Confirm card: who wrote the message that is being replied to / forwarded. */
+/**
+ * Context for the Confirm card of a reply or a forward: who wrote the message, and for a reply the recipients it
+ * will really go to (computed from the received message by the same function the send uses, reply-all included).
+ * Throws when the message cannot be read: the gate then creates no card, because the user could not see who gets it.
+ */
 async function describeOriginalMessage(user, name, args) {
-  if (name === 'send_email' || name === 'create_calendar_event') return null;
+  if (name !== 'reply_email' && name !== 'forward_email') return null;
   const token = await getValidToken(user.id, 'gmail');
-  if (!token) return null;
+  if (!token) throw new Error('Gmail is not connected');
   const m = await getGmailMessage(token, String(args.message_id || ''));
-  return { original: { from: m.from || '', subject: m.subject || '', date: m.date || '' } };
+  const original = { from: m.from || '', subject: m.subject || '', date: m.date || '' };
+  if (name === 'forward_email') return { original };
+  const r = replyRecipients(m, { replyAll: args.reply_all === true, cc: args.cc });
+  return { original, recipients: { to: r.to, cc: r.cc, bcc: String(args.bcc || '') } };
 }
 
 /** The Calendar call. Reached directly for an event without guests, or through performIrreversible() after Confirm. */
@@ -635,8 +643,8 @@ export async function runTool(block, user, context = {}) {
         onApprovalRequired: context.onApprovalRequired,
         describe: (args) => describeOriginalMessage(user, name, args),
       });
-      if (gate) return { type: 'tool_result', tool_use_id: id, is_error: gate.is_error, content: gate.content };
-      return performIrreversible(name, input, user, id); // APPROVAL_MODE=legacy with the model's own flag
+      if (gate !== PROCEED) return { type: 'tool_result', tool_use_id: id, is_error: gate.is_error, content: gate.content };
+      return await performIrreversible(name, input, user, id); // APPROVAL_MODE=legacy with the model's own flag
     }
     if (name === 'create_email_draft' && user) {
       const token = await getValidToken(user.id, 'gmail');
@@ -872,8 +880,8 @@ export async function runTool(block, user, context = {}) {
         get admin() { return context.admin || getAdminClient(); }, // only needed (and created) when guests make it approvable
         onApprovalRequired: context.onApprovalRequired,
       });
-      if (gate) return { type: 'tool_result', tool_use_id: id, is_error: gate.is_error, content: gate.content };
-      return createEventFor(user, input, id); // no guests, or APPROVAL_MODE=legacy
+      if (gate !== PROCEED) return { type: 'tool_result', tool_use_id: id, is_error: gate.is_error, content: gate.content };
+      return await createEventFor(user, input, id); // no guests, or APPROVAL_MODE=legacy
     }
     if (name === 'search_outlook' && user) {
       const token = await getValidMicrosoftToken(user.id, 'outlook');

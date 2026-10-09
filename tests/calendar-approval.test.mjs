@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { normalizeArgs, digestArgs, attendeeEntries, createPending, decidePending, MAX_ATTENDEES } from '../api/lib/approvals.js';
-import { gateIrreversible } from '../api/lib/sendGuard.js';
+import { gateIrreversible, PROCEED } from '../api/lib/sendGuard.js';
 import { makeApproveHandler } from '../api/lib/approveHandler.js';
 import { runTool, performIrreversible, CREATE_EVENT_TOOL } from '../api/lib/claudeTools.js';
 import { makeApprovalDb } from './helpers/fakeApprovalDb.mjs';
@@ -75,7 +75,7 @@ const gate = (input, ctx = {}) => {
 test('gate: an event without guests is not gated (no card, no stored request)', async () => {
   for (const attendees of [undefined, [], [''], [null, {}], 'a@b.co', 7]) {
     const { r, cards, db } = await gate({ summary: 's', start: '2026-10-12T10:00:00Z', attendees });
-    assert.equal(r, null, JSON.stringify(attendees));
+    assert.equal(r, PROCEED, JSON.stringify(attendees));
     assert.equal(cards.length, 0);
     assert.equal(db.tables.approval_requests.length, 0);
   }
@@ -107,7 +107,7 @@ test('gate: bad guests are blocked with a reason and store nothing; no card chan
 test('gate: legacy mode is the explicit emergency switch and says so; an unknown mode blocks', async () => {
   const log = quiet();
   const legacy = await gate(EVENT, { env: { APPROVAL_MODE: 'legacy' }, log });
-  assert.equal(legacy.r, null);
+  assert.equal(legacy.r, PROCEED);
   assert.ok(log.w.some((m) => /legacy/.test(m) && /F09 open/.test(m)));
   const invalid = await gate(EVENT, { env: { APPROVAL_MODE: 'nope' } });
   assert.equal(invalid.r.is_error, true);
@@ -161,7 +161,10 @@ test('runTool: no guests and no admin client in the context needs no approval st
   const saved = process.env.VITE_SUPABASE_URL;
   delete process.env.VITE_SUPABASE_URL; delete process.env.SUPABASE_URL;
   try {
-    await assert.rejects(runTool({ id: 't3', name: 'create_calendar_event', input: { summary: 'Solo', start: '2026-10-12T10:00:00Z' } }, USER, {}), /Missing SUPABASE_URL/);
+    const out = await runTool({ id: 't3', name: 'create_calendar_event', input: { summary: 'Solo', start: '2026-10-12T10:00:00Z' } }, USER, {});
+    assert.equal(out.is_error, true);
+    assert.match(out.content, /Missing SUPABASE_URL/, 'the failure is the connector lookup (no env), not the approval gate');
+    assert.ok(!/NOT CREATED YET|blocked/.test(out.content));
   } finally { process.env.VITE_SUPABASE_URL = saved; }
   assert.deepEqual(eventPosts(), []);
 });

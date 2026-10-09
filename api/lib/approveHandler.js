@@ -8,11 +8,16 @@ const STATUS = { not_found: 404, expired: 410, corrupt: 409, store_unavailable: 
 
 const isCalendar = (action) => action === 'create_calendar_event';
 
+/**
+ * What to tell the user when the provider call failed, without echoing provider text (it can quote the message).
+ * Only a 4xx answer proves the provider did nothing; a 5xx, a timeout or a reply we could not read may have gone through.
+ */
 function safeFailure(e, action) {
   const code = /\b([45]\d\d)\b/.exec(String(e?.message || ''))?.[1];
   const who = isCalendar(action) ? 'Google Calendar' : 'Gmail';
-  const nothing = isCalendar(action) ? 'Nothing was created.' : 'Nothing was sent.';
-  return code ? `${who} refused the request (HTTP ${code}). ${nothing}` : `The request to ${who} failed. ${nothing}`;
+  if (code && code.startsWith('4')) return `${who} refused the request (HTTP ${code}). ${isCalendar(action) ? 'Nothing was created.' : 'Nothing was sent.'}`;
+  const check = isCalendar(action) ? 'check your calendar' : 'check your Sent folder';
+  return `The request to ${who} did not complete${code ? ` (HTTP ${code})` : ''}. It may or may not have gone through: ${check} before asking again.`;
 }
 
 export function makeApproveHandler({ getUser, getAdmin, perform, allow = () => true, log = console, now = () => Date.now() }) {

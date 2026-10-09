@@ -25,7 +25,7 @@ const FIELDS = {
 const BOOL_FIELDS = new Set(['reply_all', 'all_day']); // true only for the boolean true, never for a truthy string
 const LIST_FIELDS = new Set(['attendees']); // canonical form: unique, trimmed, lower-case e-mail addresses
 const REQUIRED = {
-  send_email: ['to', 'body'],
+  send_email: ['to', 'subject', 'body'], // sendGmail() refuses an empty subject: refuse it now, not after the user pressed Confirm
   reply_email: ['message_id', 'body'],
   forward_email: ['message_id', 'to'],
   create_calendar_event: ['summary', 'start', 'attendees'],
@@ -36,7 +36,17 @@ const MAX_LEN = {
 };
 const DATE_FIELDS = ['start', 'end']; // must parse, so a bad value is refused now and not after the user pressed Confirm
 export const MAX_ATTENDEES = 20;
+export const MAX_RECIPIENTS = 50; // per field (to / cc / bcc)
 const EMAIL_RE = /^[^\s@<>(),;:"\\]+@[^\s@<>(),;:"\\]+\.[^\s@<>(),;:"\\]+$/;
+const ADDRESS_ASCII_RE = /^[\x21-\x7e]+$/; // addresses are shown and sent as plain ASCII: no homoglyphs, no bidi tricks, no spaces
+const MESSAGE_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
+// The card must show exactly what is sent. A control character (CR/LF above all) in a single-line field becomes a
+// new MIME header ("Subject: x\r\nBcc: attacker@..."), and bidi overrides / invisible joiners reorder or hide text.
+const CONTROL_SINGLE_LINE_RE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
+const CONTROL_MULTI_LINE_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u2028\u2029]/; // body / description keep \t \n \r
+const DECEPTIVE_RE = /[\u202a-\u202e\u2066-\u2069\u2060-\u2064\ufeff]/;
+const MULTI_LINE_FIELDS = new Set(['body', 'description']);
+const RECIPIENT_FIELDS = new Set(['to', 'cc', 'bcc']);
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export const APPROVABLE_ACTIONS = Object.keys(FIELDS);
@@ -50,6 +60,35 @@ const fail = (code, message) => Object.assign(new Error(message || code), { code
 export function attendeeEntries(input) {
   if (!Array.isArray(input?.attendees)) return [];
   return input.attendees.map((a) => (typeof a === 'string' ? { email: a } : a)).filter((a) => a?.email);
+}
+
+/** One plain, ASCII e-mail address (what the card shows and the MIME encoder receives). */
+export function isPlainAddress(value) {
+  const v = String(value ?? '');
+  return v.length > 0 && v.length <= 254 && ADDRESS_ASCII_RE.test(v) && EMAIL_RE.test(v);
+}
+
+/**
+ * to / cc / bcc: a comma or semicolon separated list of "addr" or "Name <addr>", reduced to unique bare addresses.
+ * Anything else (a display name that contains an address, control or non-ASCII characters) is refused, so the card
+ * shows the real recipients and nobody can hide one in a header.
+ */
+function normalizeRecipients(raw, field) {
+  const text = String(raw ?? '');
+  const seen = new Map();
+  for (const part of text.split(/[,;]/)) {
+    const piece = part.trim();
+    if (!piece) continue;
+    const named = /^(?:"[^"<>@,;\\]*"|[^<>"@,;()\\]*)\s*<([^<>\s]+)>$/.exec(piece);
+    const addr = (named ? named[1] : piece).trim();
+    if (!isPlainAddress(addr)) {
+      throw fail('invalid_args', `${field} must contain plain e-mail addresses separated by commas (a display name must not contain an address; ASCII only)`);
+    }
+    const key = addr.toLowerCase();
+    if (!seen.has(key)) seen.set(key, addr);
+  }
+  if (seen.size > MAX_RECIPIENTS) throw fail('invalid_args', `${field} has more than ${MAX_RECIPIENTS} addresses`);
+  return [...seen.values()].join(', ');
 }
 
 function normalizeAttendees(input) {
@@ -72,7 +111,15 @@ export function normalizeArgs(action, args) {
   for (const f of fields) {
     if (BOOL_FIELDS.has(f)) out[f] = a[f] === true;
     else if (LIST_FIELDS.has(f)) out[f] = normalizeAttendees(a);
-    else out[f] = String(a[f] ?? '');
+    else {
+      const raw = String(a[f] ?? '');
+      if (raw.length > MAX_LEN[f]) throw fail('invalid_args', `${f} is too long`); // before any scanning of a huge value
+      if ((MULTI_LINE_FIELDS.has(f) ? CONTROL_MULTI_LINE_RE : CONTROL_SINGLE_LINE_RE).test(raw) || DECEPTIVE_RE.test(raw)) {
+        throw fail('invalid_args', `${f} contains control or invisible formatting characters`);
+      }
+      out[f] = RECIPIENT_FIELDS.has(f) ? normalizeRecipients(raw, f) : raw;
+      if (f === 'message_id' && out[f] && !MESSAGE_ID_RE.test(out[f])) throw fail('invalid_args', 'message_id is not a valid message id');
+    }
   }
   for (const f of REQUIRED[action]) {
     const v = out[f];
@@ -98,8 +145,21 @@ const iso = (ms) => new Date(ms).toISOString();
  * repeats the call must not stack cards). Throws {code: invalid_args | not_approvable | too_many_pending |
  * approval_store_unavailable}.
  */
-export async function createPending({ admin, userId, action, args, now = Date.now() }) {
+export async function createPending(opts) {
+  const { userId } = opts || {};
   if (typeof userId !== 'string' || !userId) throw fail('invalid_args', 'userId is required');
+  // The model may issue many tool calls at once (chat.js runs them with Promise.all). The "count open, then insert"
+  // below is not atomic in the database, so calls of one user are queued one after the other in this process.
+  // Other server instances can still overlap; the overshoot is bounded by the instances serving one user at a time.
+  const previous = creating.get(userId) || Promise.resolve();
+  const run = previous.catch(() => {}).then(() => createPendingNow(opts));
+  const tail = run.catch(() => {}).then(() => { if (creating.get(userId) === tail) creating.delete(userId); });
+  creating.set(userId, tail);
+  return run;
+}
+const creating = new Map();
+
+async function createPendingNow({ admin, userId, action, args, now = Date.now() }) {
   const normalized = normalizeArgs(action, args);
   const digest = digestArgs(action, normalized);
   const nowIso = iso(now);

@@ -11,7 +11,10 @@ export interface ApprovalCard {
   id: string
   action: ApprovalAction
   fields: Record<string, string | boolean | string[]>
-  context?: { original?: { from?: string; subject?: string; date?: string } } | null
+  context?: {
+    original?: { from?: string; subject?: string; date?: string }
+    recipients?: { to?: string; cc?: string; bcc?: string }
+  } | null
   expires_at: string
 }
 
@@ -52,6 +55,10 @@ function Row({ label, value, dark }: { label: string; value: string; dark: boole
   )
 }
 
+function lineCount(s: string) {
+  return s === '' ? 0 : s.split(/\r\n|\r|\n/).length
+}
+
 function remaining(expiresAt: string, now: number) {
   const ms = Date.parse(expiresAt) - now
   return Number.isFinite(ms) ? Math.max(0, ms) : 0
@@ -85,7 +92,7 @@ export default function ApprovalTray({ cards, setCards, accessToken, dark }: Pro
       })
       const data = await res.json().catch(() => ({}))
       if (res.ok && data?.ok) patch(card.id, { status: data.status === 'sent' || data.status === 'created' ? 'sent' : 'cancelled' })
-      else patch(card.id, { status: res.status === 410 ? 'expired' : 'failed', message: String(data?.error || 'The request failed. Nothing was done.') })
+      else patch(card.id, { status: res.status === 410 ? 'expired' : 'failed', message: String(data?.error || 'The server did not confirm the result. It may or may not have gone through: check your Sent folder or calendar before asking again.') })
     } catch {
       patch(card.id, { status: 'failed', message: card.action === 'create_calendar_event'
           ? 'Could not reach the server. The event may or may not have been created: check your calendar before asking again.'
@@ -105,6 +112,8 @@ export default function ApprovalTray({ cards, setCards, accessToken, dark }: Pro
         const timedOut = c.status === 'pending' && left === 0
         const orig = c.context?.original
         const isEvent = c.action === 'create_calendar_event'
+        const isReply = c.action === 'reply_email'
+        const rcpt = c.context?.recipients
         const bodyText = text(isEvent ? f.description : f.body)
         return (
           <section key={c.id} role="group" aria-label={TITLE[c.action]} data-testid="approval-card" data-status={c.status}
@@ -126,16 +135,22 @@ export default function ApprovalTray({ cards, setCards, accessToken, dark }: Pro
               {isEvent && <Row dark={dark} label="When" value={whenText(f)} />}
               {isEvent && <Row dark={dark} label="Where" value={text(f.location)} />}
               {isEvent && <Row dark={dark} label="Guests" value={text(f.attendees)} />}
-              {!isEvent && c.action !== 'reply_email' && <Row dark={dark} label="To" value={text(f.to)} />}
-              {c.action === 'reply_email' && <Row dark={dark} label="Mode" value={f.reply_all === true ? 'Reply to all' : 'Reply to sender'} />}
-              {!isEvent && <Row dark={dark} label="Cc" value={text(f.cc)} />}
-              {!isEvent && <Row dark={dark} label="Bcc" value={text(f.bcc)} />}
+              {!isEvent && !isReply && <Row dark={dark} label="To" value={text(f.to)} />}
+              {isReply && <Row dark={dark} label="Mode" value={f.reply_all === true ? 'Reply to all' : 'Reply to sender'} />}
+              {isReply && <Row dark={dark} label="To" value={rcpt?.to ? text(rcpt.to) : 'Unknown - do not confirm, cancel and ask again'} />}
+              {!isEvent && <Row dark={dark} label="Cc" value={isReply ? text(rcpt?.cc ?? f.cc) : text(f.cc)} />}
+              {!isEvent && <Row dark={dark} label="Bcc" value={isReply ? text(rcpt?.bcc ?? f.bcc) : text(f.bcc)} />}
               {c.action === 'send_email' && <Row dark={dark} label="Subject" value={text(f.subject)} />}
             </div>
             {bodyText !== '' && (
               <pre data-testid="approval-body" className={'mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-xl p-2.5 text-[13px] leading-5 font-sans ' + (dark ? 'bg-black/30' : 'bg-slate-50')}>
                 {bodyText}
               </pre>
+            )}
+            {bodyText !== '' && (
+              <p data-testid="approval-body-size" className={'mt-1 text-[11px] ' + (dark ? 'text-slate-400' : 'text-slate-500')}>
+                {lineCount(bodyText)} lines, {bodyText.length} characters. Scroll the box to read all of it before confirming.
+              </p>
             )}
             {open ? (
               <div className="mt-3 flex flex-wrap items-center gap-2">

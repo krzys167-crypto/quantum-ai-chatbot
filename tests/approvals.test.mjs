@@ -34,8 +34,9 @@ test('normalizeArgs rejects missing required fields, oversize values and non-app
 test('digest depends on the action and on every shown field, not on extras', () => {
   const base = digestArgs('send_email', SEND);
   assert.equal(base, digestArgs('send_email', { ...SEND, user_confirmed: true, junk: 'x' }));
-  for (const f of ['to', 'subject', 'body', 'cc', 'bcc']) assert.notEqual(base, digestArgs('send_email', { ...SEND, [f]: SEND[f] + 'x' }), f);
-  assert.notEqual(digestArgs('reply_email', { message_id: 'm', body: 'b' }), digestArgs('forward_email', { message_id: 'm', body: 'b', to: 'x' }));
+  const changed = { to: 'other@example.com', cc: 'cc2@example.com', bcc: 'bcc2@example.com', subject: SEND.subject + 'x', body: SEND.body + 'x' };
+  for (const f of Object.keys(changed)) assert.notEqual(base, digestArgs('send_email', { ...SEND, [f]: changed[f] }), f);
+  assert.notEqual(digestArgs('reply_email', { message_id: 'm', body: 'b' }), digestArgs('forward_email', { message_id: 'm', body: 'b', to: 'x@y.zz' }));
 });
 
 test('createPending stores the canonical content for this user only, with a 10 minute life', async () => {

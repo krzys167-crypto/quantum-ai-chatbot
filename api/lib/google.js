@@ -1,4 +1,5 @@
 /** Shared Google OAuth + token helpers for serverless functions */
+import { headerValue } from './mimeHeaders.js';
 
 export const PROVIDER_SCOPES = {
   gmail: [
@@ -163,11 +164,11 @@ function decodeB64(data) {
 
 function encodeRawMessage({ to, subject, body, cc, bcc, from }) {
   const headers = [
-    from ? `From: ${from}` : null,
-    `To: ${to}`,
-    cc ? `Cc: ${cc}` : null,
-    bcc ? `Bcc: ${bcc}` : null,
-    `Subject: ${subject}`,
+    from ? `From: ${headerValue(from)}` : null,
+    `To: ${headerValue(to)}`,
+    cc ? `Cc: ${headerValue(cc)}` : null,
+    bcc ? `Bcc: ${headerValue(bcc)}` : null,
+    `Subject: ${headerValue(subject)}`,
     'MIME-Version: 1.0',
     'Content-Type: text/plain; charset="UTF-8"',
   ].filter(Boolean);
