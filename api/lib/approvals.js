@@ -125,9 +125,6 @@ export function normalizeArgs(action, args) {
     const v = out[f];
     if (Array.isArray(v) ? v.length === 0 : !v.trim()) throw fail('invalid_args', `${f} is required`);
   }
-  for (const f of fields) {
-    if (typeof out[f] === 'string' && out[f].length > MAX_LEN[f]) throw fail('invalid_args', `${f} is too long`);
-  }
   for (const f of DATE_FIELDS) {
     if (fields.includes(f) && out[f] && !Number.isFinite(Date.parse(out[f]))) throw fail('invalid_args', `${f} is not a valid date`);
   }
