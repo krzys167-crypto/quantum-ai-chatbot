@@ -68,6 +68,7 @@ import {
   captureValuesBefore,
   recordSheetEdit,
 } from './sheetHistory.js';
+import { neutralizeGrid, neutralizedNote } from './sheetSafety.js';
 
 /** Anthropic server-side tools — executed by Anthropic, not by us */
 export const ANTHROPIC_WEB_SEARCH_TOOL = {
@@ -1324,10 +1325,13 @@ export async function runTool(block, user, context = {}) {
           content: 'Google Sheets is not connected. Reconnect with write access.',
           is_error: true,
         };
+      // Formulas that fetch web addresses (IMAGE, IMPORT*, HYPERLINK) are written as text, see sheetSafety.js.
+      const hasHeaders = Array.isArray(input.headers) && input.headers.length > 0;
+      const safe = neutralizeGrid([...(hasHeaders ? [input.headers] : []), ...(Array.isArray(input.rows) ? input.rows : [])]);
       const result = await createSpreadsheet(token, {
         title: String(input.title || 'Untitled'),
-        headers: input.headers,
-        rows: input.rows,
+        headers: hasHeaders ? safe.rows[0] : input.headers,
+        rows: hasHeaders ? safe.rows.slice(1) : safe.rows,
       });
       // Undoing a creation bins the file rather than destroying it, so this is
       // recorded like any other edit and is just as reversible.
@@ -1339,7 +1343,7 @@ export async function runTool(block, user, context = {}) {
         before: null,
         after: { title: result.title },
       });
-      return { type: 'tool_result', tool_use_id: id, content: JSON.stringify({ ...result, ...journal }) };
+      return { type: 'tool_result', tool_use_id: id, content: JSON.stringify({ ...result, ...journal, ...neutralizedNote(safe.hits) }) };
     }
     if (name === 'update_sheet' && user) {
       const token = await getValidToken(user.id, 'google_sheets');
@@ -1352,7 +1356,11 @@ export async function runTool(block, user, context = {}) {
         };
       const spreadsheetId = String(input.spreadsheet_id || '');
       const range = input.range || 'A1';
-      const values = input.values || [];
+      // Formulas that fetch web addresses (IMAGE, IMPORT*, HYPERLINK) are written as text, see sheetSafety.js. The
+      // journal records what was really written, so redo repeats exactly that and undo restores the user's own cells.
+      const safe = neutralizeGrid(input.values);
+      const values = safe.rows;
+      const note = neutralizedNote(safe.hits);
       const admin = getAdminClient();
 
       // An append lands wherever the data currently ends, which is not known
@@ -1369,7 +1377,7 @@ export async function runTool(block, user, context = {}) {
               kind: 'values',
               range: written,
               before: null,
-              after: values.map((row) => (Array.isArray(row) ? row.map((c) => (c == null ? '' : String(c))) : [String(row ?? '')])),
+              after: values,
             })
           : { undo_id: null, undoable: false };
         return {
@@ -1378,6 +1386,7 @@ export async function runTool(block, user, context = {}) {
           content: JSON.stringify({
             ...result,
             ...journal,
+            ...note,
             ...(journal.undoable
               ? { undo_note: 'Undoing this clears the appended cells; the empty rows themselves stay.' }
               : {}),
@@ -1393,10 +1402,10 @@ export async function runTool(block, user, context = {}) {
         kind: 'values',
         range: captured.range,
         before: captured.before,
-        after: values.map((row) => (Array.isArray(row) ? row.map((c) => (c == null ? '' : String(c))) : [String(row ?? '')])),
+        after: values,
         tooLarge: captured.tooLarge,
       });
-      return { type: 'tool_result', tool_use_id: id, content: JSON.stringify({ ...result, ...journal }) };
+      return { type: 'tool_result', tool_use_id: id, content: JSON.stringify({ ...result, ...journal, ...note }) };
     }
     if ((name === 'add_file_comment' || name === 'reply_to_file_comment') && user) {
       // F09: a comment is shown to everyone with access to the file, who are notified by Google. The model can only file

