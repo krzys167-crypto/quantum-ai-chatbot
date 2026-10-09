@@ -1,4 +1,6 @@
 /** Deeper Gmail helpers: reply, forward, labels, bulk modify */
+import { headerValue } from './mimeHeaders.js';
+import { isPlainAddress } from './approvals.js';
 
 function decodeB64(data) {
   try {
@@ -42,13 +44,13 @@ function extractEmail(fromHeader) {
 
 function encodeRawMime({ to, subject, body, cc, bcc, from, inReplyTo, references }) {
   const headers = [
-    from ? `From: ${from}` : null,
-    `To: ${to}`,
-    cc ? `Cc: ${cc}` : null,
-    bcc ? `Bcc: ${bcc}` : null,
-    `Subject: ${subject}`,
-    inReplyTo ? `In-Reply-To: ${inReplyTo}` : null,
-    references ? `References: ${references}` : null,
+    from ? `From: ${headerValue(from)}` : null,
+    `To: ${headerValue(to)}`,
+    cc ? `Cc: ${headerValue(cc)}` : null,
+    bcc ? `Bcc: ${headerValue(bcc)}` : null,
+    `Subject: ${headerValue(subject)}`,
+    inReplyTo ? `In-Reply-To: ${headerValue(inReplyTo)}` : null,
+    references ? `References: ${headerValue(references)}` : null,
     'MIME-Version: 1.0',
     'Content-Type: text/plain; charset="UTF-8"',
   ].filter(Boolean);
@@ -97,36 +99,34 @@ function bodyFields(raw, maxBodyChars) {
   };
 }
 
+/**
+ * Who a reply goes to, from the received message: the single sender address plus, for reply-all, everyone on its
+ * To / Cc lines. Used both for the Confirm card and for the send, so the card shows exactly the recipients that get it.
+ * Throws when the From header does not yield exactly one plain address (a header such as "a@x.com, b@y.com").
+ */
+export function replyRecipients(orig, { replyAll = false, cc } = {}) {
+  const to = extractEmail(orig.from);
+  if (!isPlainAddress(to)) throw new Error('Could not determine a single reply recipient from the original From header');
+  const list = cc ? String(cc).split(',').map((s) => s.trim()).filter(Boolean) : [];
+  if (replyAll) {
+    for (const part of `${orig.to || ''},${orig.cc || ''}`.split(',')) {
+      const e = extractEmail(part.trim());
+      if (e && isPlainAddress(e) && e.toLowerCase() !== to.toLowerCase()) list.push(e);
+    }
+  }
+  const seen = new Set();
+  const unique = list.filter((a) => (seen.has(a.toLowerCase()) ? false : seen.add(a.toLowerCase())));
+  return { to, cc: unique.join(', ') };
+}
+
 export async function replyGmail(accessToken, { messageId, body, replyAll, cc, bcc }) {
   if (!messageId) throw new Error('messageId is required');
   if (!body) throw new Error('body is required');
   const orig = await getGmailMessage(accessToken, messageId);
-  const to = extractEmail(orig.from);
-  if (!to) throw new Error('Could not determine reply recipient from original From header');
+  const { to, cc: ccFinal } = replyRecipients(orig, { replyAll: !!replyAll, cc });
 
   let subject = orig.subject || '';
   if (!/^re:\s/i.test(subject)) subject = `Re: ${subject}`;
-
-  let ccFinal = cc ? String(cc) : undefined;
-  if (replyAll) {
-    const extras = [];
-    if (orig.to) {
-      for (const part of orig.to.split(',')) {
-        const e = extractEmail(part.trim());
-        if (e && e.toLowerCase() !== to.toLowerCase()) extras.push(e);
-      }
-    }
-    if (orig.cc) {
-      for (const part of orig.cc.split(',')) {
-        const e = extractEmail(part.trim());
-        if (e && e.toLowerCase() !== to.toLowerCase()) extras.push(e);
-      }
-    }
-    if (extras.length) {
-      const set = new Set([...(ccFinal ? ccFinal.split(',').map((s) => s.trim()) : []), ...extras]);
-      ccFinal = [...set].filter(Boolean).join(', ');
-    }
-  }
 
   const inReplyTo = orig.messageIdHeader || undefined;
   const references = [orig.references, orig.messageIdHeader].filter(Boolean).join(' ').trim() || undefined;
@@ -135,7 +135,7 @@ export async function replyGmail(accessToken, { messageId, body, replyAll, cc, b
     to,
     subject,
     body: String(body),
-    cc: ccFinal,
+    cc: ccFinal || undefined,
     bcc: bcc ? String(bcc) : undefined,
     inReplyTo,
     references,
