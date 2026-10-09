@@ -134,6 +134,31 @@ test('tts: an unexpected exception returns a fixed message and logs the real one
   assert.ok(logText().includes(MARK));
 });
 
+test('tts: a voice_id that is not a plain id is refused before any ElevenLabs call (it is part of the URL path)', async () => {
+  let calls = 0;
+  world.eleven = async () => { calls++; return new Response('audio', { status: 200 }); };
+  for (const bad of ['../../v1/voices/add', '..', 'a/b', 'a.b', 'abc?x', 'abc?', 'abc?output_format=x', 'abc#x', '%2e%2e', 'abc%2Fx', '%2e%2e/x', 'a b', ' ', 'x'.repeat(65), { a: 1 }, ['abc']]) {
+    const r = res();
+    await tts(req('POST', { text: 'Hello there.', voice_id: bad }), r);
+    assert.equal(r.statusCode, 400, `voice_id ${JSON.stringify(bad)} must be refused`);
+    assert.deepEqual(r.body, { error: 'voice_id is not valid' });
+  }
+  assert.equal(calls, 0, 'no request reached ElevenLabs');
+});
+
+test('tts: a normal voice_id is passed through to the URL unchanged, and so is the default', async () => {
+  const urls = [];
+  world.eleven = async (url) => { urls.push(String(url)); return new Response('audio', { status: 200 }); };
+  const r1 = res();
+  await tts(req('POST', { text: 'Hello there.', voice_id: VOICE }), r1);
+  const r2 = res();
+  await tts(req('POST', { text: 'Hello there.' }), r2);
+  assert.equal(r1.statusCode, 200);
+  assert.equal(r2.statusCode, 200);
+  assert.ok(urls[0].startsWith(`https://api.elevenlabs.io/v1/text-to-speech/${VOICE}?`));
+  assert.ok(urls[1].startsWith('https://api.elevenlabs.io/v1/text-to-speech/rPlZjuLXpONhaMouRFww?'));
+});
+
 // ---------------------------------------------------------------- stt
 
 const sttReq = () => {

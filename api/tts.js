@@ -14,6 +14,8 @@ import { GENERIC, fail, failUpstream } from './lib/publicError.js';
 // this needs headroom above chat's limit for a burst of legitimate use.
 const RATE_LIMIT = 40;
 const RATE_WINDOW_MS = 60_000;
+// ElevenLabs voice ids are 20 letters and digits; the pattern is wider than that on purpose and still has no "/", "." or "?".
+const VOICE_ID = /^[A-Za-z0-9_-]{1,64}$/;
 
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', allowedOrigin());
@@ -56,6 +58,12 @@ export default async function handler(req, res) {
       const cut = text.slice(0, maxLen);
       const lastStop = Math.max(cut.lastIndexOf('. '), cut.lastIndexOf('! '), cut.lastIndexOf('? '), cut.lastIndexOf(', '));
       text = lastStop > 40 ? cut.slice(0, lastStop + 1) : cut;
+    }
+
+    // voice_id goes into the URL path of the ElevenLabs call, which carries the server's API key. Anything but a plain
+    // id ("../../v1/voices/add", "x?y=1") would point that call at a different ElevenLabs endpoint.
+    if (body?.voice_id && !(typeof body.voice_id === 'string' && VOICE_ID.test(body.voice_id))) {
+      return res.status(400).json({ error: 'voice_id is not valid' });
     }
 
     const voiceId =
