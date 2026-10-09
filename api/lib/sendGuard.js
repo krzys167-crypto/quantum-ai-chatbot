@@ -1,14 +1,15 @@
-// Guard for irreversible Gmail actions, called from runTool().
+// Gate for irreversible Gmail actions, called from runTool().
 //
-//   APPROVAL_MODE unset / "legacy"  -> the old behaviour: the MODEL-supplied `user_confirmed === true` (F09: this is
-//                                      not evidence of user consent; kept as the default so production does not change
-//                                      before the front end can ask the user).
-//   APPROVAL_MODE = "server"        -> a server-signed approval token for exactly these arguments is required
-//                                      (see approval.js). `user_confirmed` is ignored. Misconfiguration blocks.
-import { verifyApproval, approvalSecretProblem, APPROVABLE_ACTIONS } from './approval.js';
+//   APPROVAL_MODE unset / "server"  -> the model can NEVER send: the call is turned into a pending approval and
+//                                      a Confirm card with the exact content is shown to the signed-in user
+//                                      (see approvals.js). Misconfiguration or a missing store blocks (fail closed).
+//   APPROVAL_MODE = "legacy"        -> the old behaviour: the MODEL-supplied `user_confirmed === true` (F09: this is
+//                                      not evidence of user consent). Kept only as an explicit, logged emergency
+//                                      switch; it is not the default.
+import { APPROVABLE_ACTIONS, createPending, normalizeArgs } from './approvals.js';
 
 export function approvalMode(env = process.env) {
-  const raw = String(env.APPROVAL_MODE || 'legacy').trim().toLowerCase();
+  const raw = String(env.APPROVAL_MODE || 'server').trim().toLowerCase();
   return raw === 'server' ? 'server' : raw === 'legacy' ? 'legacy' : 'invalid';
 }
 
@@ -18,16 +19,64 @@ const LEGACY_TEXT = {
   forward_email: 'Forward blocked: user_confirmed must be true. Confirm recipient with the user first.',
 };
 
-// Returns null when the action may proceed, otherwise the text of the error to give back to the model.
-export function guardIrreversible(name, input, user, { env = process.env, now = Date.now() } = {}) {
+const PENDING_TEXT = (action) =>
+  `NOT SENT YET. The user has been shown a Confirm card with exactly these fields for ${action}. It is sent only when the user presses Confirm in the app; you cannot confirm for them and must not call this tool again for the same content. Tell the user briefly to review the card and press Confirm (or Cancel).`;
+
+const blocked = (content) => ({ content, is_error: true });
+
+const REASON_TEXT = {
+  too_many_pending: 'blocked: too many unconfirmed requests are waiting. Ask the user to confirm or cancel the open ones first.',
+  approval_store_unavailable: 'blocked: the approval store is unavailable (apply supabase/approval-requests.sql), so nothing can be sent.',
+};
+
+/**
+ * Returns null when the action may proceed right now (legacy mode with the model's flag), otherwise
+ * { content, is_error } to hand back to the model as the tool result.
+ *   ctx.admin               Supabase service client
+ *   ctx.onApprovalRequired  (card) => void : pushes the Confirm card to the user's open stream; absent => cannot confirm
+ *   ctx.describe            async () => object|null : best-effort context for the card (e.g. the message being replied to)
+ */
+export async function gateIrreversible(name, input, user, ctx = {}) {
   if (!APPROVABLE_ACTIONS.includes(name)) return null;
+  const env = ctx.env || process.env;
+  const log = ctx.log || console;
   const mode = approvalMode(env);
-  if (mode === 'invalid') return `${name} blocked: APPROVAL_MODE must be "legacy" or "server".`;
-  if (mode === 'legacy') return input && input.user_confirmed === true ? null : LEGACY_TEXT[name];
-  const problem = approvalSecretProblem(env.APPROVAL_SECRET);
-  if (problem) return `${name} blocked: ${problem}.`;
-  const v = verifyApproval({
-    secret: env.APPROVAL_SECRET, token: input && input.approval_token, userId: user && user.id, action: name, args: input, now,
-  });
-  return v.ok ? null : `${name} blocked: ${v.reason}. The user must confirm the exact content in the app; the assistant cannot confirm for them.`;
+  if (mode === 'invalid') return blocked(`${name} blocked: APPROVAL_MODE must be "server" or "legacy".`);
+
+  if (mode === 'legacy') {
+    if (input && input.user_confirmed === true) {
+      log.warn?.(`[approval] APPROVAL_MODE=legacy: ${name} released on the model's own flag (F09 open)`);
+      return null;
+    }
+    return blocked(LEGACY_TEXT[name]);
+  }
+
+  if (!user?.id) return blocked(`${name} blocked: no signed-in user.`);
+  if (typeof ctx.onApprovalRequired !== 'function') {
+    return blocked(`${name} blocked: this request cannot show a Confirm card (non-interactive mode). Create a draft instead and tell the user to send it themselves.`);
+  }
+  let pending;
+  try {
+    pending = await createPending({ admin: ctx.admin, userId: user.id, action: name, args: input, now: ctx.now });
+  } catch (e) {
+    if (e?.code === 'invalid_args') return blocked(`${name} blocked: ${e.message}.`);
+    return blocked(`${name} ${REASON_TEXT[e?.code] || REASON_TEXT.approval_store_unavailable}`);
+  }
+  let extra = null;
+  try { extra = (await ctx.describe?.(pending.args)) || null; } catch { /* the card still shows the exact fields */ }
+  try {
+    ctx.onApprovalRequired({
+      id: pending.id,
+      action: name,
+      fields: pending.args,
+      context: extra,
+      expires_at: new Date(pending.expiresAt).toISOString(),
+    });
+  } catch {
+    return blocked(`${name} blocked: the Confirm card could not be delivered to the user. Nothing was sent.`);
+  }
+  log.info?.(JSON.stringify({ evt: 'approval_requested', user: user.id, action: name, reused: pending.reused }));
+  return { content: PENDING_TEXT(name), is_error: false };
 }
+
+export { normalizeArgs };

@@ -1,6 +1,6 @@
 /** Tool defs + execution for chat connectors */
 import { randomUUID } from 'crypto';
-import { guardIrreversible } from './sendGuard.js';
+import { gateIrreversible } from './sendGuard.js';
 import { getAdminClient } from './supabaseAdmin.js';
 import {
   getGoogleConfig,
@@ -65,7 +65,7 @@ export const GMAIL_TOOL = {
 export const SEND_EMAIL_TOOL = {
   name: 'send_email',
   description:
-    'Send a new email from Gmail. Irreversible — only after the user explicitly confirmed To, Subject, and Body. Set user_confirmed=true only after confirmation.',
+    'Send a new email from Gmail. Irreversible, so nothing is sent by this call: the app shows the user a Confirm card with exactly these fields and sends only when the user presses Confirm. Call it once the content is final; do not claim it was sent.',
   input_schema: {
     type: 'object',
     properties: {
@@ -74,8 +74,7 @@ export const SEND_EMAIL_TOOL = {
       body: { type: 'string', description: 'Email body' },
       cc: { type: 'string' },
       bcc: { type: 'string' },
-      user_confirmed: { type: 'boolean', description: 'Must be true after user confirmed send' },
-      approval_token: { type: 'string', description: 'Server-issued approval for exactly these arguments (only when the app asks for it). Never invent one.' },
+      user_confirmed: { type: 'boolean', description: 'Ignored by the app: only the user pressing Confirm sends.' },
     },
     required: ['to', 'subject', 'body'],
   },
@@ -100,7 +99,7 @@ export const DRAFT_EMAIL_TOOL = {
 export const REPLY_EMAIL_TOOL = {
   name: 'reply_email',
   description:
-    'Reply to an existing Gmail message. Confirm body first; set user_confirmed=true after user agrees.',
+    'Reply to an existing Gmail message. Nothing is sent by this call: the app shows the user a Confirm card and sends only when the user presses Confirm.',
   input_schema: {
     type: 'object',
     properties: {
@@ -109,8 +108,7 @@ export const REPLY_EMAIL_TOOL = {
       reply_all: { type: 'boolean' },
       cc: { type: 'string' },
       bcc: { type: 'string' },
-      user_confirmed: { type: 'boolean' },
-      approval_token: { type: 'string', description: 'Server-issued approval for exactly these arguments (only when the app asks for it). Never invent one.' },
+      user_confirmed: { type: 'boolean', description: 'Ignored by the app: only the user pressing Confirm sends.' },
     },
     required: ['message_id', 'body'],
   },
@@ -119,7 +117,7 @@ export const REPLY_EMAIL_TOOL = {
 export const FORWARD_EMAIL_TOOL = {
   name: 'forward_email',
   description:
-    'Forward a Gmail message. Confirm recipient first; set user_confirmed=true after user agrees.',
+    'Forward a Gmail message. Nothing is sent by this call: the app shows the user a Confirm card and sends only when the user presses Confirm.',
   input_schema: {
     type: 'object',
     properties: {
@@ -128,8 +126,7 @@ export const FORWARD_EMAIL_TOOL = {
       body: { type: 'string' },
       cc: { type: 'string' },
       bcc: { type: 'string' },
-      user_confirmed: { type: 'boolean' },
-      approval_token: { type: 'string', description: 'Server-issued approval for exactly these arguments (only when the app asks for it). Never invent one.' },
+      user_confirmed: { type: 'boolean', description: 'Ignored by the app: only the user pressing Confirm sends.' },
     },
     required: ['message_id', 'to'],
   },
@@ -532,6 +529,55 @@ async function resolveProjectByName(admin, userId, name) {
   return data || null;
 }
 
+/** Best-effort context for a Confirm card: who wrote the message that is being replied to / forwarded. */
+async function describeOriginalMessage(user, name, args) {
+  if (name === 'send_email') return null;
+  const token = await getValidToken(user.id, 'gmail');
+  if (!token) return null;
+  const m = await getGmailMessage(token, String(args.message_id || ''));
+  return { original: { from: m.from || '', subject: m.subject || '', date: m.date || '' } };
+}
+
+/**
+ * The actual Gmail call for send_email / reply_email / forward_email. Reached only from the approval endpoint
+ * (the user pressed Confirm on the exact stored arguments) or from APPROVAL_MODE=legacy.
+ */
+export async function performIrreversible(name, input, user, id = null) {
+  const token = await getValidToken(user.id, 'gmail');
+  if (!token) return gmailNotConnected(id);
+  if (name === 'send_email') {
+    const result = await sendGmail(token, {
+      to: String(input.to || ''),
+      subject: String(input.subject || ''),
+      body: String(input.body || ''),
+      cc: input.cc ? String(input.cc) : undefined,
+      bcc: input.bcc ? String(input.bcc) : undefined,
+    });
+    return { type: 'tool_result', tool_use_id: id, content: JSON.stringify({ sent: true, ...result }) };
+  }
+  if (name === 'reply_email') {
+    const result = await replyGmail(token, {
+      messageId: String(input.message_id || ''),
+      body: String(input.body || ''),
+      replyAll: !!input.reply_all,
+      cc: input.cc ? String(input.cc) : undefined,
+      bcc: input.bcc ? String(input.bcc) : undefined,
+    });
+    return { type: 'tool_result', tool_use_id: id, content: JSON.stringify({ replied: true, ...result }) };
+  }
+  if (name === 'forward_email') {
+    const result = await forwardGmail(token, {
+      messageId: String(input.message_id || ''),
+      to: String(input.to || ''),
+      body: input.body ? String(input.body) : undefined,
+      cc: input.cc ? String(input.cc) : undefined,
+      bcc: input.bcc ? String(input.bcc) : undefined,
+    });
+    return { type: 'tool_result', tool_use_id: id, content: JSON.stringify({ forwarded: true, ...result }) };
+  }
+  throw new Error(`not an irreversible action: ${String(name)}`);
+}
+
 export async function runTool(block, user, context = {}) {
   const id = block.id;
   const name = block.name;
@@ -557,23 +603,16 @@ export async function runTool(block, user, context = {}) {
       const msg = await getGmailMessage(token, String(input.message_id || ''));
       return { type: 'tool_result', tool_use_id: id, content: JSON.stringify(msg) };
     }
-    if (name === 'send_email' && user) {
-      const blockedText = guardIrreversible(name, input, user);
-      if (blockedText) return { type: 'tool_result', tool_use_id: id, is_error: true, content: blockedText };
-      const token = await getValidToken(user.id, 'gmail');
-      if (!token) return gmailNotConnected(id);
-      const result = await sendGmail(token, {
-        to: String(input.to || ''),
-        subject: String(input.subject || ''),
-        body: String(input.body || ''),
-        cc: input.cc ? String(input.cc) : undefined,
-        bcc: input.bcc ? String(input.bcc) : undefined,
+    if ((name === 'send_email' || name === 'reply_email' || name === 'forward_email') && user) {
+      // F09: the model can never release these. In server mode it only files a pending approval; the user
+      // releases it with the Confirm card (POST /api/approve-action), which calls performIrreversible().
+      const gate = await gateIrreversible(name, input, user, {
+        admin: context.admin || getAdminClient(),
+        onApprovalRequired: context.onApprovalRequired,
+        describe: (args) => describeOriginalMessage(user, name, args),
       });
-      return {
-        type: 'tool_result',
-        tool_use_id: id,
-        content: JSON.stringify({ sent: true, ...result }),
-      };
+      if (gate) return { type: 'tool_result', tool_use_id: id, is_error: gate.is_error, content: gate.content };
+      return performIrreversible(name, input, user, id); // APPROVAL_MODE=legacy with the model's own flag
     }
     if (name === 'create_email_draft' && user) {
       const token = await getValidToken(user.id, 'gmail');
@@ -589,42 +628,6 @@ export async function runTool(block, user, context = {}) {
         type: 'tool_result',
         tool_use_id: id,
         content: JSON.stringify({ drafted: true, ...result }),
-      };
-    }
-    if (name === 'reply_email' && user) {
-      const blockedText = guardIrreversible(name, input, user);
-      if (blockedText) return { type: 'tool_result', tool_use_id: id, is_error: true, content: blockedText };
-      const token = await getValidToken(user.id, 'gmail');
-      if (!token) return gmailNotConnected(id);
-      const result = await replyGmail(token, {
-        messageId: String(input.message_id || ''),
-        body: String(input.body || ''),
-        replyAll: !!input.reply_all,
-        cc: input.cc ? String(input.cc) : undefined,
-        bcc: input.bcc ? String(input.bcc) : undefined,
-      });
-      return {
-        type: 'tool_result',
-        tool_use_id: id,
-        content: JSON.stringify({ replied: true, ...result }),
-      };
-    }
-    if (name === 'forward_email' && user) {
-      const blockedText = guardIrreversible(name, input, user);
-      if (blockedText) return { type: 'tool_result', tool_use_id: id, is_error: true, content: blockedText };
-      const token = await getValidToken(user.id, 'gmail');
-      if (!token) return gmailNotConnected(id);
-      const result = await forwardGmail(token, {
-        messageId: String(input.message_id || ''),
-        to: String(input.to || ''),
-        body: input.body ? String(input.body) : undefined,
-        cc: input.cc ? String(input.cc) : undefined,
-        bcc: input.bcc ? String(input.bcc) : undefined,
-      });
-      return {
-        type: 'tool_result',
-        tool_use_id: id,
-        content: JSON.stringify({ forwarded: true, ...result }),
       };
     }
     if (name === 'modify_gmail' && user) {
