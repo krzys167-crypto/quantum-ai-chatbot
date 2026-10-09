@@ -1,0 +1,27 @@
+# Tests + typecheck + production build on every pull request and on main. Read-only, no secrets, no deploy.
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Node version (the tests need Node 20 or newer)
+        run: |
+          node -v
+          node -e "process.exit(Number(process.versions.node.split('.')[0]) >= 20 ? 0 : 1)"
+      - run: npm ci --ignore-scripts
+      - run: npm test
+      - name: Typecheck and production build (inflates the compressed App source first)
+        run: npm run build
