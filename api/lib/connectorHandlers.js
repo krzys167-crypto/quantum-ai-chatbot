@@ -47,7 +47,7 @@ export function makeStartHandler({
       return res.status(status).json(body);
     } catch (err) {
       log.error?.(`${family}-start error:`, err);
-      return res.status(500).json({ error: err.message || 'Internal error' });
+      return res.status(500).json({ error: 'Internal error' });
     }
   };
 }
@@ -104,7 +104,7 @@ export function makeDisconnectHandler({ getUser, getAdmin, scopesByFamily, googl
       return res.status(status).json(out);
     } catch (err) {
       log.error?.('disconnect error:', err);
-      return res.status(500).json({ error: err.message || 'Internal error' });
+      return res.status(500).json({ error: 'Internal error' });
     }
   };
 }

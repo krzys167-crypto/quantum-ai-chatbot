@@ -208,6 +208,23 @@ test('disconnect: 401 unauthenticated, 400 without provider or with a prototype 
   assert.equal(e.statusCode, 405);
 });
 
+test('500 responses never carry the raw error message (start and disconnect)', async () => {
+  const secret = 'connection string postgres://user:pw@host/db';
+  const admin = makeAdmin();
+  const a = res();
+  await startHandler(admin, { getAdmin: () => { throw new Error(secret); } })(
+    { method: 'GET', headers: { authorization: 'Bearer u1' }, query: { provider: 'gmail' } }, a);
+  assert.equal(a.statusCode, 500);
+  assert.deepEqual(a.body, { error: 'Internal error' });
+  assert.ok(!JSON.stringify(a.body).includes('postgres'));
+  const { h } = disc(admin, { getAdmin: () => { throw new Error(secret); } });
+  const b = res();
+  await h({ method: 'POST', headers: { authorization: 'Bearer u1' }, body: { provider: 'gmail' } }, b);
+  assert.equal(b.statusCode, 500);
+  assert.deepEqual(b.body, { error: 'Internal error' });
+  assert.ok(!JSON.stringify(b.body).includes('postgres'));
+});
+
 // Static check of the thin bindings in api/connectors/ (they are not importable here without the
 // Supabase client): each endpoint must be wired to its own provider family and scope map.
 test('static wiring: every endpoint is bound to its own family and scope map', () => {

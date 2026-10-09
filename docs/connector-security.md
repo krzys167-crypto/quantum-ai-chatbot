@@ -18,7 +18,7 @@ Evidence: `npm test` (79 tests, all 20 seeded faults caught), real-PostgreSQL pr
 | F07 MEDIUM | Disconnect did not revoke at the provider | fixed for Google, limited for Microsoft | Row deleted first, then the Google token is revoked (skipped when another connector of the same Google account still shares the grant, compared case-insensitively). Microsoft v2 has no refresh-token revocation endpoint; the response says `unsupported_provider`. |
 | P6 | Refresh path | fixed in code | Rotated refresh tokens are stored (Microsoft rotates every time); `invalid_grant` marks the connector `revoked` instead of failing every call. |
 
-Not changed on purpose: CORS `*` on `google-start` and `disconnect` (calls need a Bearer token; tighten to `APP_URL` if wanted); the `grant delete` for `authenticated` (the UI could delete a row directly and skip provider revocation; the alternative is to route every disconnect through `/api/connectors/disconnect`); raw `err.message` in a few 500 responses (pre-existing).
+Not changed on purpose: CORS `*` on `google-start` and `disconnect` (calls need a Bearer token; tighten to `APP_URL` if wanted); the `grant delete` for `authenticated` (the UI could delete a row directly and skip provider revocation; the alternative is to route every disconnect through `/api/connectors/disconnect`); raw `err.message` in 500 responses outside the connector endpoints (`api/cron/notes-reminders.js`; note-tool errors go to the model, not to the client).
 
 ## Configuration (all optional; defaults keep today's behaviour)
 
@@ -97,7 +97,7 @@ A reviewer who had not seen this analysis read the diff and ran it against Postg
 | 11 low (V) | Shared-grant check was case-sensitive | fixed |
 | 12 low | Rollback SQL grants ALL | kept, documented as temporary |
 | 13 info | Docs said "four helper files"; compare-and-set puts tokens in the URL; no key rotation | docs corrected; key rotation not implemented (single `enc:v1`, no key id) |
-| 14 info | Raw `err.message` in a few 500 responses | pre-existing, open |
+| 14 info | Raw `err.message` in 500 responses | fixed for `google-start`/`microsoft-start` and `disconnect` (fixed body `Internal error`, details only in the server log, test added). Still open elsewhere: `api/cron/notes-reminders.js` |
 
 ## Unverified / blocked
 
