@@ -1,4 +1,5 @@
 /** Shared Google OAuth + token helpers for serverless functions */
+import { headerValue } from './mimeHeaders.js';
 
 // Read budgets, matched to driveRead.js so all three readers behave the same.
 // Reads are paginated rather than silently cut: a truncated result always says
@@ -215,11 +216,11 @@ function decodeB64(data) {
 
 function encodeRawMessage({ to, subject, body, cc, bcc, from }) {
   const headers = [
-    from ? `From: ${from}` : null,
-    `To: ${to}`,
-    cc ? `Cc: ${cc}` : null,
-    bcc ? `Bcc: ${bcc}` : null,
-    `Subject: ${subject}`,
+    from ? `From: ${headerValue(from)}` : null,
+    `To: ${headerValue(to)}`,
+    cc ? `Cc: ${headerValue(cc)}` : null,
+    bcc ? `Bcc: ${headerValue(bcc)}` : null,
+    `Subject: ${headerValue(subject)}`,
     'MIME-Version: 1.0',
     'Content-Type: text/plain; charset="UTF-8"',
   ].filter(Boolean);
@@ -1173,6 +1174,25 @@ export async function replyToFileComment(accessToken, fileId, commentId, { conte
   if (!res.ok) throw new Error(`Reply failed: ${res.status} ${(await res.text()).slice(0, 200)}`);
   const r = await res.json();
   return { id: r.id, content: r.content, created: r.createdTime, resolved: r.action === 'resolve' };
+}
+
+/**
+ * Name and type of a Drive file, for the Confirm card of a comment. Best effort: returns null on any failure, because
+ * the card also shows the exact stored fields and the file id, and the comment is never posted without the user's Confirm.
+ */
+export async function getDriveFileInfo(accessToken, fileId) {
+  if (!fileId) return null;
+  try {
+    const res = await fetch(
+      `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?fields=name,mimeType&supportsAllDrives=true`,
+      { headers: { Authorization: `Bearer ${accessToken}` } },
+    );
+    if (!res.ok) return null;
+    const f = await res.json();
+    return { name: String(f.name || '').slice(0, 200), type: String(f.mimeType || '').slice(0, 100) };
+  } catch {
+    return null;
+  }
 }
 
 export async function listCalendarEvents(accessToken, { timeMin, timeMax, maxResults = 15, query } = {}) {

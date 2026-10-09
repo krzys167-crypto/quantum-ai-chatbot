@@ -76,6 +76,7 @@ create policy "Users can delete own connectors"
 | `GOOGLE_CLIENT_ID` | Server |
 | `GOOGLE_CLIENT_SECRET` | Server |
 | `APP_URL` | Server, e.g. `https://quantumy-xi.vercel.app` |
+| `APPROVAL_MODE` | Server, optional. Unset = `server`: sending, replying, forwarding e-mail, creating, changing or cancelling a calendar event that has guests, and commenting on a shared file need the user's Confirm click (run `supabase/approval-requests.sql` first; see `docs/approval.md`). `legacy` is an emergency switch only. |
 
 Redeploy after adding env vars.
 

@@ -16,6 +16,7 @@ import CommandPalette from './components/CommandPalette'
 import ProjectsWorkspace from './components/ProjectsWorkspace'
 import ProjectDashboard from './components/ProjectDashboard'
 import NotesDashboard from './components/NotesDashboard'
+import ApprovalTray, { addApprovalCard, type ApprovalCardState } from './components/ApprovalTray'
 import ConnectorStatusBadges from './components/ConnectorStatusBadges'
 
 const MODEL = { id: 'quantumy', name: 'Quantumy', anthropic: 'claude-sonnet-5' as const }
@@ -104,6 +105,7 @@ export default function App() {
   const [projects, setProjects] = useState<Project[]>([])
   const [currentProjectId, setCurrentProjectId] = useState<string | null>(null)
   const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([])
+  const [approvals, setApprovals] = useState<ApprovalCardState[]>([])
   const thinkStartedAt = useRef<number | null>(null)
   const [thoughtSeconds, setThoughtSeconds] = useState<number | null>(null)
   const [suggestions, setSuggestions] = useState<string[]>([])
@@ -593,6 +595,10 @@ export default function App() {
           try {
             const evt = JSON.parse(payload)
             if (evt.status === 'started') continue
+            if (evt.status === 'approval_required' && evt.approval) {
+              setApprovals((p) => addApprovalCard(p, evt.approval))
+              continue
+            }
             if (evt.status === 'tool_use') {
               const names = Array.isArray(evt.tools) ? evt.tools.filter(Boolean) : []
               const label = (typeof evt.message === 'string' && evt.message) || (names.length ? names.join(' · ') : evt.tool || 'Working…')
@@ -1034,6 +1040,7 @@ export default function App() {
                 </div>
               </div>
             )}
+            <ApprovalTray cards={approvals} setCards={setApprovals} accessToken={session?.access_token} />
             <ChatInput
               value={input}
               onChange={setInput}

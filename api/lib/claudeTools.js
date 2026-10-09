@@ -1,5 +1,6 @@
 /** Tool defs + execution for chat connectors */
 import { randomUUID } from 'crypto';
+import { gateIrreversible, PROCEED } from './sendGuard.js';
 import { getAdminClient } from './supabaseAdmin.js';
 import { getValidConnectorToken } from './connectorTokens.js';
 import {
@@ -29,11 +30,14 @@ import {
   createCalendarEvent,
   updateCalendarEvent,
   deleteCalendarEvent,
+  getCalendarEvent,
+  getDriveFileInfo,
   uploadDriveFile,
 } from './google.js';
 import { generateExecutivePdf } from './pdfGenerator.js';
 import {
   replyGmail,
+  replyRecipients,
   forwardGmail,
   listGmailLabels,
   batchModifyGmail,
@@ -94,7 +98,7 @@ export const GMAIL_TOOL = {
 export const SEND_EMAIL_TOOL = {
   name: 'send_email',
   description:
-    'Send a new email from Gmail. Irreversible — only after the user explicitly confirmed To, Subject, and Body. Set user_confirmed=true only after confirmation.',
+    'Send a new email from Gmail. Irreversible, so nothing is sent by this call: the app shows the user a Confirm card with exactly these fields and sends only when the user presses Confirm. Call it once the content is final; do not claim it was sent.',
   input_schema: {
     type: 'object',
     properties: {
@@ -103,7 +107,7 @@ export const SEND_EMAIL_TOOL = {
       body: { type: 'string', description: 'Email body' },
       cc: { type: 'string' },
       bcc: { type: 'string' },
-      user_confirmed: { type: 'boolean', description: 'Must be true after user confirmed send' },
+      user_confirmed: { type: 'boolean', description: 'Ignored by the app: only the user pressing Confirm sends.' },
     },
     required: ['to', 'subject', 'body'],
   },
@@ -128,7 +132,7 @@ export const DRAFT_EMAIL_TOOL = {
 export const REPLY_EMAIL_TOOL = {
   name: 'reply_email',
   description:
-    'Reply to an existing Gmail message. Confirm body first; set user_confirmed=true after user agrees.',
+    'Reply to an existing Gmail message. Nothing is sent by this call: the app shows the user a Confirm card and sends only when the user presses Confirm.',
   input_schema: {
     type: 'object',
     properties: {
@@ -137,7 +141,7 @@ export const REPLY_EMAIL_TOOL = {
       reply_all: { type: 'boolean' },
       cc: { type: 'string' },
       bcc: { type: 'string' },
-      user_confirmed: { type: 'boolean' },
+      user_confirmed: { type: 'boolean', description: 'Ignored by the app: only the user pressing Confirm sends.' },
     },
     required: ['message_id', 'body'],
   },
@@ -146,7 +150,7 @@ export const REPLY_EMAIL_TOOL = {
 export const FORWARD_EMAIL_TOOL = {
   name: 'forward_email',
   description:
-    'Forward a Gmail message. Confirm recipient first; set user_confirmed=true after user agrees.',
+    'Forward a Gmail message. Nothing is sent by this call: the app shows the user a Confirm card and sends only when the user presses Confirm.',
   input_schema: {
     type: 'object',
     properties: {
@@ -155,7 +159,7 @@ export const FORWARD_EMAIL_TOOL = {
       body: { type: 'string' },
       cc: { type: 'string' },
       bcc: { type: 'string' },
-      user_confirmed: { type: 'boolean' },
+      user_confirmed: { type: 'boolean', description: 'Ignored by the app: only the user pressing Confirm sends.' },
     },
     required: ['message_id', 'to'],
   },
@@ -489,7 +493,7 @@ export const CALENDAR_TOOL = {
 
 export const CREATE_EVENT_TOOL = {
   name: 'create_calendar_event',
-  description: 'Create a Google Calendar event. Confirm first if attendees are included.',
+  description: 'Create a Google Calendar event. Without attendees it is created immediately. With attendees nothing is created by this call: the app shows the user a Confirm card with the exact event and guests, and the event exists only after the user presses Confirm. Never say guests were invited until a tool result says so.',
   input_schema: {
     type: 'object',
     properties: {
@@ -745,6 +749,212 @@ async function resolveProjectByName(admin, userId, name) {
   return data || null;
 }
 
+/**
+ * Context for the Confirm card of a reply or a forward: who wrote the message, and for a reply the recipients it
+ * will really go to (computed from the received message by the same function the send uses, reply-all included).
+ * Throws when the message cannot be read: the gate then creates no card, because the user could not see who gets it.
+ */
+async function describeOriginalMessage(user, name, args) {
+  if (name !== 'reply_email' && name !== 'forward_email') return null;
+  const token = await getValidToken(user.id, 'gmail');
+  if (!token) throw new Error('Gmail is not connected');
+  const m = await getGmailMessage(token, String(args.message_id || ''));
+  const original = { from: m.from || '', subject: m.subject || '', date: m.date || '' };
+  if (name === 'forward_email') return { original };
+  const r = replyRecipients(m, { replyAll: args.reply_all === true, cc: args.cc });
+  return { original, recipients: { to: r.to, cc: r.cc, bcc: String(args.bcc || '') } };
+}
+
+/** The Calendar call. Reached directly for an event without guests, or through performIrreversible() after Confirm. */
+async function createEventFor(user, input, id = null) {
+  const token = await getValidToken(user.id, 'google_calendar');
+  if (!token)
+    return {
+      type: 'tool_result',
+      tool_use_id: id,
+      content: 'Google Calendar is not connected. Reconnect with write access.',
+      is_error: true,
+    };
+  const result = await createCalendarEvent(token, {
+    summary: String(input.summary || ''),
+    description: input.description ? String(input.description) : undefined,
+    location: input.location ? String(input.location) : undefined,
+    start: String(input.start || ''),
+    end: input.end ? String(input.end) : undefined,
+    allDay: !!input.all_day,
+    timeZone: input.time_zone ? String(input.time_zone) : undefined,
+    attendees: Array.isArray(input.attendees) ? input.attendees : undefined,
+  });
+  return { type: 'tool_result', tool_use_id: id, content: JSON.stringify(result) };
+}
+
+/**
+ * Context for the Confirm card of a calendar edit or cancellation: which event it is and who is on it. Throws when
+ * Calendar cannot be read; the gate then blocks, because it cannot tell whether a third party is affected.
+ */
+async function describeCalendarEvent(user, args) {
+  const token = await getValidToken(user.id, 'google_calendar');
+  if (!token) throw new Error('Google Calendar is not connected');
+  const ev = await getCalendarEvent(token, String(args.event_id || ''));
+  if (ev.status === 'cancelled') throw new Error('The event is already cancelled');
+  const guests = (Array.isArray(ev.attendees) ? ev.attendees : [])
+    .filter((a) => a && a.self !== true)
+    .map((a) => String(a.email || a.displayName || 'unknown guest'));
+  return {
+    event: {
+      summary: ev.summary || '',
+      start: ev.start?.dateTime || ev.start?.date || '',
+      end: ev.end?.dateTime || ev.end?.date || '',
+      guests,
+      recurring: !!ev.recurringEventId,
+    },
+  };
+}
+
+/** The Calendar call for update_calendar_event. Reached directly for an event nobody else is on, or through performIrreversible() after Confirm. */
+async function updateEventFor(user, input, id = null) {
+  const token = await getValidToken(user.id, 'google_calendar');
+  if (!token)
+    return {
+      type: 'tool_result',
+      tool_use_id: id,
+      content: 'Google Calendar is not connected. Reconnect with write access.',
+      is_error: true,
+    };
+  // Undefined and empty string mean different things here: undefined leaves
+  // a field alone, '' clears it. Only pass through what was actually sent.
+  const opt = (v) => (v === undefined ? undefined : String(v));
+  const list = (v) => (Array.isArray(v) ? v : undefined);
+  const result = await updateCalendarEvent(token, String(input.event_id || ''), {
+    summary: opt(input.summary),
+    description: opt(input.description),
+    location: opt(input.location),
+    start: opt(input.start),
+    end: opt(input.end),
+    allDay: input.all_day === undefined ? undefined : !!input.all_day,
+    timeZone: opt(input.time_zone),
+    attendees: list(input.attendees),
+    addAttendees: list(input.add_attendees),
+    removeAttendees: list(input.remove_attendees),
+    notify: input.notify === undefined ? undefined : !!input.notify,
+  });
+  return { type: 'tool_result', tool_use_id: id, content: JSON.stringify(result) };
+}
+
+/** The Calendar call for delete_calendar_event (same two ways in as updateEventFor). */
+async function deleteEventFor(user, input, id = null) {
+  const token = await getValidToken(user.id, 'google_calendar');
+  if (!token)
+    return {
+      type: 'tool_result',
+      tool_use_id: id,
+      content: 'Google Calendar is not connected. Reconnect with write access.',
+      is_error: true,
+    };
+  const result = await deleteCalendarEvent(token, String(input.event_id || ''), {
+    notify: input.notify === undefined ? undefined : !!input.notify,
+  });
+  return { type: 'tool_result', tool_use_id: id, content: JSON.stringify(result) };
+}
+
+// Comments are a Drive feature, so they need a Drive-family token even when the file is a spreadsheet. drive.file from
+// the Sheets or Docs connector only reaches files Quantumy itself created, which is why the full Drive connector is
+// named first in the failure message.
+async function driveCommentToken(user) {
+  return (
+    (await getValidToken(user.id, 'google_drive')) ||
+    (await getValidToken(user.id, 'google_sheets')) ||
+    (await getValidToken(user.id, 'google_docs'))
+  );
+}
+const COMMENT_NEEDS_DRIVE =
+  'Comments need the Google Drive connector. Sheets or Docs alone can only reach files Quantumy created itself.';
+
+/** The Drive calls for add_file_comment / reply_to_file_comment. Throws on a provider error. */
+async function postComment(token, name, input) {
+  const fileId = String(input.file_id || '');
+  if (name === 'add_file_comment') {
+    return createFileComment(token, fileId, {
+      content: String(input.comment || ''),
+      cell: input.cell ? String(input.cell) : undefined,
+    });
+  }
+  return replyToFileComment(token, fileId, String(input.comment_id || ''), {
+    content: String(input.reply || ''),
+    resolve: !!input.resolve,
+  });
+}
+
+function commentFailure(id, e) {
+  const msg = e?.message || String(e);
+  return {
+    type: 'tool_result',
+    tool_use_id: id,
+    // 403 on a comment is a sharing problem, not a bug — say which.
+    content: /\b403\b/.test(msg)
+      ? `${msg} — this account may have view-only access to that file; commenting needs comment or edit access.`
+      : msg,
+    is_error: true,
+  };
+}
+
+/** Best-effort context for a comment card: the name of the file. The card always shows the exact fields anyway. */
+async function describeDriveFile(user, args) {
+  const token = await driveCommentToken(user);
+  if (!token) return null;
+  const info = await getDriveFileInfo(token, String(args.file_id || ''));
+  return info ? { file: info } : null;
+}
+
+/**
+ * The actual call for send_email / reply_email / forward_email / create_calendar_event (with guests) and the calendar
+ * edits and Drive comments that reach other people. Reached only
+ * from the approval endpoint (the user pressed Confirm on the exact stored arguments) or from APPROVAL_MODE=legacy.
+ */
+export async function performIrreversible(name, input, user, id = null) {
+  if (name === 'create_calendar_event') return createEventFor(user, input, id);
+  if (name === 'update_calendar_event') return updateEventFor(user, input, id);
+  if (name === 'delete_calendar_event') return deleteEventFor(user, input, id);
+  if (name === 'add_file_comment' || name === 'reply_to_file_comment') {
+    const token = await driveCommentToken(user);
+    if (!token) return { type: 'tool_result', tool_use_id: id, content: COMMENT_NEEDS_DRIVE, is_error: true };
+    return { type: 'tool_result', tool_use_id: id, content: JSON.stringify(await postComment(token, name, input)) }; // throws on a provider error: the approval endpoint reports it
+  }
+  const token = await getValidToken(user.id, 'gmail');
+  if (!token) return gmailNotConnected(id);
+  if (name === 'send_email') {
+    const result = await sendGmail(token, {
+      to: String(input.to || ''),
+      subject: String(input.subject || ''),
+      body: String(input.body || ''),
+      cc: input.cc ? String(input.cc) : undefined,
+      bcc: input.bcc ? String(input.bcc) : undefined,
+    });
+    return { type: 'tool_result', tool_use_id: id, content: JSON.stringify({ sent: true, ...result }) };
+  }
+  if (name === 'reply_email') {
+    const result = await replyGmail(token, {
+      messageId: String(input.message_id || ''),
+      body: String(input.body || ''),
+      replyAll: !!input.reply_all,
+      cc: input.cc ? String(input.cc) : undefined,
+      bcc: input.bcc ? String(input.bcc) : undefined,
+    });
+    return { type: 'tool_result', tool_use_id: id, content: JSON.stringify({ replied: true, ...result }) };
+  }
+  if (name === 'forward_email') {
+    const result = await forwardGmail(token, {
+      messageId: String(input.message_id || ''),
+      to: String(input.to || ''),
+      body: input.body ? String(input.body) : undefined,
+      cc: input.cc ? String(input.cc) : undefined,
+      bcc: input.bcc ? String(input.bcc) : undefined,
+    });
+    return { type: 'tool_result', tool_use_id: id, content: JSON.stringify({ forwarded: true, ...result }) };
+  }
+  throw new Error(`not an irreversible action: ${String(name)}`);
+}
+
 export async function runTool(block, user, context = {}) {
   const id = block.id;
   const name = block.name;
@@ -772,30 +982,16 @@ export async function runTool(block, user, context = {}) {
       });
       return { type: 'tool_result', tool_use_id: id, content: JSON.stringify(msg) };
     }
-    if (name === 'send_email' && user) {
-      if (input.user_confirmed !== true) {
-        return {
-          type: 'tool_result',
-          tool_use_id: id,
-          is_error: true,
-          content:
-            'Send blocked: user_confirmed must be true. Confirm To/Subject/Body with the user first, then call send_email with user_confirmed=true. Prefer create_email_draft if unconfirmed.',
-        };
-      }
-      const token = await getValidToken(user.id, 'gmail');
-      if (!token) return gmailNotConnected(id);
-      const result = await sendGmail(token, {
-        to: String(input.to || ''),
-        subject: String(input.subject || ''),
-        body: String(input.body || ''),
-        cc: input.cc ? String(input.cc) : undefined,
-        bcc: input.bcc ? String(input.bcc) : undefined,
+    if ((name === 'send_email' || name === 'reply_email' || name === 'forward_email') && user) {
+      // F09: the model can never release these. In server mode it only files a pending approval; the user
+      // releases it with the Confirm card (POST /api/approve-action), which calls performIrreversible().
+      const gate = await gateIrreversible(name, input, user, {
+        admin: context.admin || getAdminClient(),
+        onApprovalRequired: context.onApprovalRequired,
+        describe: (args) => describeOriginalMessage(user, name, args),
       });
-      return {
-        type: 'tool_result',
-        tool_use_id: id,
-        content: JSON.stringify({ sent: true, ...result }),
-      };
+      if (gate !== PROCEED) return { type: 'tool_result', tool_use_id: id, is_error: gate.is_error, content: gate.content };
+      return await performIrreversible(name, input, user, id); // APPROVAL_MODE=legacy with the model's own flag
     }
     if (name === 'create_email_draft' && user) {
       const token = await getValidToken(user.id, 'gmail');
@@ -811,54 +1007,6 @@ export async function runTool(block, user, context = {}) {
         type: 'tool_result',
         tool_use_id: id,
         content: JSON.stringify({ drafted: true, ...result }),
-      };
-    }
-    if (name === 'reply_email' && user) {
-      if (input.user_confirmed !== true) {
-        return {
-          type: 'tool_result',
-          tool_use_id: id,
-          is_error: true,
-          content: 'Reply blocked: user_confirmed must be true. Confirm the reply with the user first.',
-        };
-      }
-      const token = await getValidToken(user.id, 'gmail');
-      if (!token) return gmailNotConnected(id);
-      const result = await replyGmail(token, {
-        messageId: String(input.message_id || ''),
-        body: String(input.body || ''),
-        replyAll: !!input.reply_all,
-        cc: input.cc ? String(input.cc) : undefined,
-        bcc: input.bcc ? String(input.bcc) : undefined,
-      });
-      return {
-        type: 'tool_result',
-        tool_use_id: id,
-        content: JSON.stringify({ replied: true, ...result }),
-      };
-    }
-    if (name === 'forward_email' && user) {
-      if (input.user_confirmed !== true) {
-        return {
-          type: 'tool_result',
-          tool_use_id: id,
-          is_error: true,
-          content: 'Forward blocked: user_confirmed must be true. Confirm recipient with the user first.',
-        };
-      }
-      const token = await getValidToken(user.id, 'gmail');
-      if (!token) return gmailNotConnected(id);
-      const result = await forwardGmail(token, {
-        messageId: String(input.message_id || ''),
-        to: String(input.to || ''),
-        body: input.body ? String(input.body) : undefined,
-        cc: input.cc ? String(input.cc) : undefined,
-        bcc: input.bcc ? String(input.bcc) : undefined,
-      });
-      return {
-        type: 'tool_result',
-        tool_use_id: id,
-        content: JSON.stringify({ forwarded: true, ...result }),
       };
     }
     if (name === 'modify_gmail' && user) {
@@ -1250,60 +1398,34 @@ export async function runTool(block, user, context = {}) {
       });
       return { type: 'tool_result', tool_use_id: id, content: JSON.stringify({ ...result, ...journal }) };
     }
-    if (
-      (name === 'read_file_comments' || name === 'add_file_comment' || name === 'reply_to_file_comment') &&
-      user
-    ) {
-      // Comments are a Drive feature, so this needs a Drive-family token even
-      // when the file is a spreadsheet. drive.file from the Sheets or Docs
-      // connector only reaches files Quantumy itself created, which is why the
-      // full Drive connector is named first in the failure message.
-      const token =
-        (await getValidToken(user.id, 'google_drive')) ||
-        (await getValidToken(user.id, 'google_sheets')) ||
-        (await getValidToken(user.id, 'google_docs'));
-      if (!token) {
-        return {
-          type: 'tool_result',
-          tool_use_id: id,
-          content:
-            'Comments need the Google Drive connector. Sheets or Docs alone can only reach files ' +
-            'Quantumy created itself.',
-          is_error: true,
-        };
-      }
-      const fileId = String(input.file_id || '');
+    if ((name === 'add_file_comment' || name === 'reply_to_file_comment') && user) {
+      // F09: a comment is shown to everyone with access to the file, who are notified by Google. The model can only file
+      // a pending approval; the user posts it with the Confirm card.
+      const gate = await gateIrreversible(name, input, user, {
+        get admin() { return context.admin || getAdminClient(); },
+        onApprovalRequired: context.onApprovalRequired,
+        describe: (args) => describeDriveFile(user, args),
+      });
+      if (gate !== PROCEED) return { type: 'tool_result', tool_use_id: id, is_error: gate.is_error, content: gate.content }; 
+      const token = await driveCommentToken(user); // APPROVAL_MODE=legacy
+      if (!token) return { type: 'tool_result', tool_use_id: id, content: COMMENT_NEEDS_DRIVE, is_error: true };
       try {
-        if (name === 'read_file_comments') {
-          const result = await listFileComments(token, fileId, {
-            maxResults: input.max_results,
-            includeResolved: !!input.include_resolved,
-          });
-          return { type: 'tool_result', tool_use_id: id, content: JSON.stringify(result) };
-        }
-        if (name === 'add_file_comment') {
-          const result = await createFileComment(token, fileId, {
-            content: String(input.comment || ''),
-            cell: input.cell ? String(input.cell) : undefined,
-          });
-          return { type: 'tool_result', tool_use_id: id, content: JSON.stringify(result) };
-        }
-        const result = await replyToFileComment(token, fileId, String(input.comment_id || ''), {
-          content: String(input.reply || ''),
-          resolve: !!input.resolve,
+        return { type: 'tool_result', tool_use_id: id, content: JSON.stringify(await postComment(token, name, input)) };
+      } catch (e) {
+        return commentFailure(id, e);
+      }
+    }
+    if (name === 'read_file_comments' && user) {
+      const token = await driveCommentToken(user);
+      if (!token) return { type: 'tool_result', tool_use_id: id, content: COMMENT_NEEDS_DRIVE, is_error: true };
+      try {
+        const result = await listFileComments(token, String(input.file_id || ''), {
+          maxResults: input.max_results,
+          includeResolved: !!input.include_resolved,
         });
         return { type: 'tool_result', tool_use_id: id, content: JSON.stringify(result) };
       } catch (e) {
-        const msg = e?.message || String(e);
-        return {
-          type: 'tool_result',
-          tool_use_id: id,
-          // 403 on a comment is a sharing problem, not a bug — say which.
-          content: /\b403\b/.test(msg)
-            ? `${msg} — this account may have view-only access to that file; commenting needs comment or edit access.`
-            : msg,
-          is_error: true,
-        };
+        return commentFailure(id, e);
       }
     }
     if (SHEET_HISTORY_TOOL_NAMES.has(name) && user) {
@@ -1393,67 +1515,24 @@ export async function runTool(block, user, context = {}) {
       };
     }
     if (name === 'create_calendar_event' && user) {
-      const token = await getValidToken(user.id, 'google_calendar');
-      if (!token)
-        return {
-          type: 'tool_result',
-          tool_use_id: id,
-          content: 'Google Calendar is not connected. Reconnect with write access.',
-          is_error: true,
-        };
-      const result = await createCalendarEvent(token, {
-        summary: String(input.summary || ''),
-        description: input.description ? String(input.description) : undefined,
-        location: input.location ? String(input.location) : undefined,
-        start: String(input.start || ''),
-        end: input.end ? String(input.end) : undefined,
-        allDay: !!input.all_day,
-        timeZone: input.time_zone ? String(input.time_zone) : undefined,
-        attendees: Array.isArray(input.attendees) ? input.attendees : undefined,
+      // F09: with guests the model can never create it. In server mode it only files a pending approval.
+      const gate = await gateIrreversible(name, input, user, {
+        get admin() { return context.admin || getAdminClient(); }, // only needed (and created) when guests make it approvable
+        onApprovalRequired: context.onApprovalRequired,
       });
-      return { type: 'tool_result', tool_use_id: id, content: JSON.stringify(result) };
+      if (gate !== PROCEED) return { type: 'tool_result', tool_use_id: id, is_error: gate.is_error, content: gate.content };
+      return await createEventFor(user, input, id); // no guests, or APPROVAL_MODE=legacy
     }
-    if (name === 'update_calendar_event' && user) {
-      const token = await getValidToken(user.id, 'google_calendar');
-      if (!token)
-        return {
-          type: 'tool_result',
-          tool_use_id: id,
-          content: 'Google Calendar is not connected. Reconnect with write access.',
-          is_error: true,
-        };
-      // Undefined and empty string mean different things here: undefined leaves
-      // a field alone, '' clears it. Only pass through what was actually sent.
-      const opt = (v) => (v === undefined ? undefined : String(v));
-      const list = (v) => (Array.isArray(v) ? v : undefined);
-      const result = await updateCalendarEvent(token, String(input.event_id || ''), {
-        summary: opt(input.summary),
-        description: opt(input.description),
-        location: opt(input.location),
-        start: opt(input.start),
-        end: opt(input.end),
-        allDay: input.all_day === undefined ? undefined : !!input.all_day,
-        timeZone: opt(input.time_zone),
-        attendees: list(input.attendees),
-        addAttendees: list(input.add_attendees),
-        removeAttendees: list(input.remove_attendees),
-        notify: input.notify === undefined ? undefined : !!input.notify,
+    if ((name === 'update_calendar_event' || name === 'delete_calendar_event') && user) {
+      // F09: changing or cancelling an event that has guests (or adding some) e-mails them. The model can only file a
+      // pending approval for that; an event nobody else is on is changed immediately, as before.
+      const gate = await gateIrreversible(name, input, user, {
+        get admin() { return context.admin || getAdminClient(); },
+        onApprovalRequired: context.onApprovalRequired,
+        describe: (args) => describeCalendarEvent(user, args),
       });
-      return { type: 'tool_result', tool_use_id: id, content: JSON.stringify(result) };
-    }
-    if (name === 'delete_calendar_event' && user) {
-      const token = await getValidToken(user.id, 'google_calendar');
-      if (!token)
-        return {
-          type: 'tool_result',
-          tool_use_id: id,
-          content: 'Google Calendar is not connected. Reconnect with write access.',
-          is_error: true,
-        };
-      const result = await deleteCalendarEvent(token, String(input.event_id || ''), {
-        notify: input.notify === undefined ? undefined : !!input.notify,
-      });
-      return { type: 'tool_result', tool_use_id: id, content: JSON.stringify(result) };
+      if (gate !== PROCEED) return { type: 'tool_result', tool_use_id: id, is_error: gate.is_error, content: gate.content };
+      return name === 'update_calendar_event' ? await updateEventFor(user, input, id) : await deleteEventFor(user, input, id);
     }
     if (name === 'search_outlook' && user) {
       const token = await getValidMicrosoftToken(user.id, 'outlook');
