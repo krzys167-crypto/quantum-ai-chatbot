@@ -161,8 +161,8 @@
       <p>
         <strong>Quantumy AI</strong> is a productivity app whose purpose is to give you a
         personal AI chatbot with <strong>persistent memory</strong>, help drafting clear
-        emails, and <strong>optional read-only Gmail</strong> so you can ask about your own
-        inbox in plain language. Connectors are opt-in and can be disconnected anytime.
+        emails, and <strong>optional Gmail, Drive, Docs, Sheets and Calendar connectors</strong> so you can ask about
+        your own mail, files and schedule in plain language. Connectors are opt-in and can be disconnected anytime.
         Everything is designed so the assistant stays useful across sessions — without
         forcing a long setup flow.
       </p>
@@ -187,7 +187,7 @@
         <article class="card">
           <div class="card-icon" aria-hidden="true">📬</div>
           <h3>Optional Gmail</h3>
-          <p>Connect Gmail read-only when you want. Search and summarize your own messages. Disconnect from Settings anytime.</p>
+          <p>Connect Gmail when you want. Search and summarize your own messages, draft replies, and send only after you confirm. Disconnect from Settings anytime.</p>
         </article>
         <article class="card">
           <div class="card-icon" aria-hidden="true">🎙️</div>
@@ -240,15 +240,20 @@
       <div class="data-box">
         <h3>What we request</h3>
         <p>
-          If you choose to connect Gmail, Quantumy AI requests <strong>read-only</strong> access to your Gmail
-          (<code>gmail.readonly</code>) and your Google account email address
-          (<code>userinfo.email</code>). We do <strong>not</strong> request send, delete, or modify permissions.
+          If you choose to connect Gmail, Quantumy AI requests access to read your Gmail
+          (<code>gmail.readonly</code>), to send mail you confirm (<code>gmail.send</code>), to create drafts
+          (<code>gmail.compose</code>), and to label, archive and move messages to Trash
+          (<code>gmail.modify</code>), plus your Google account email address and profile
+          (<code>userinfo.email</code>, <code>userinfo.profile</code>). The assistant sends mail to other people only after you
+          confirm it. Google Drive, Docs, Sheets and Calendar are separate connectors with their own permissions,
+          all listed in the <a href="/privacy.html">Privacy Policy</a>.
         </p>
         <h3>Why we request it</h3>
         <p>
-          The sole purpose is so you can ask Quantumy, in plain language, to <strong>search and summarize
-          your own email</strong> (for example: “What did Sara send last week?” or “Summarize unread messages
-          about the invoice”). Access is used only to fulfill requests you make in the chat. We do not use
+          The purpose is so you can ask Quantumy, in plain language, to <strong>search, summarize, draft and organize
+          your own email</strong> (for example: “What did Sara send last week?”, “Summarize unread messages
+          about the invoice” or “Draft a reply to Sara”). Access is used only to fulfill requests you make in the
+          chat and the scheduled features described in the <a href="/privacy.html">Privacy Policy</a>. We do not use
           Gmail data for advertising, selling, or training external models beyond generating the response
           you asked for.
         </p>
@@ -270,8 +275,8 @@
       <div>
         <h3>Privacy by design</h3>
         <p>
-          API keys never live in the browser. Gmail is opt-in with read-only access.
-          You control connectors and can revoke them at any time.
+          API keys never live in the browser. Connectors are opt-in, and the assistant asks you to confirm
+          before it sends mail, invites guests or comments on a shared file. You can revoke connectors at any time.
         </p>
       </div>
       <div class="trust-links">

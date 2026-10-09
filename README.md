@@ -53,10 +53,15 @@ create policy "Users can delete own connectors"
 
 1. Go to [Google Cloud Console](https://console.cloud.google.com/)
 2. Create/select a project
-3. **APIs & Services → Enable APIs**: Gmail API
-4. **OAuth consent screen** → External → add scopes:
-   - `.../auth/gmail.readonly`
-   - `.../auth/userinfo.email`
+3. **APIs & Services → Enable APIs**: Gmail API, Google Drive API, Google Docs API, Google Sheets API, Google Calendar API (for the connectors you use)
+4. **OAuth consent screen** → External → add exactly the scopes the app requests, per connector. The source of truth is `PROVIDER_SCOPES` in `api/lib/google.js` (Microsoft: `MS_PROVIDER_SCOPES` in `api/lib/microsoft.js`):
+   - Gmail: `gmail.readonly`, `gmail.send`, `gmail.compose`, `gmail.modify`
+   - Google Drive: `drive`
+   - Google Docs: `documents`, `drive.file`
+   - Google Sheets: `spreadsheets`, `drive.file`
+   - Google Calendar: `calendar`, `calendar.events`
+   - all of them also `userinfo.email`, `userinfo.profile`
+   - `public/privacy.html` must describe these (`tests/policy-matches-scopes.test.mjs` fails when it does not)
 5. **Credentials → Create OAuth client ID** → Web application
 6. Authorized redirect URIs:
    - `https://YOUR-APP.vercel.app/api/connectors/google-callback`
