@@ -1,42 +1,62 @@
 // Provider-agnostic OAuth connector flow. Handlers stay thin; everything that
 // decides identity, state, token storage and revocation lives here so it can be
 // tested with injected fakes (no network, no database).
-import { createOAuthState, consumeOAuthState } from './oauthState.js';
-import { sealToken } from './tokenCrypto.js';
+import { createOAuthState, consumeOAuthState, setNonceCookie, readNonce } from './oauthState.js';
+import { sealToken, assertTokenConfig } from './tokenCrypto.js';
 
 const enc = encodeURIComponent;
 const safeCode = (v) => String(v ?? '').replace(/[^A-Za-z0-9_.-]/g, '').slice(0, 64) || 'oauth_error';
 const ctx = (userId, provider, column) => ({ userId, provider, column });
 
-/** Start: create a server-side state bound to the authenticated user. */
-export async function beginFlow({ family, provider, user, admin, scopesFor, buildUrl, now }) {
-  if (!scopesFor(provider)) return { status: 400, body: { error: `Unknown provider: ${provider}` } };
-  let state;
+/** Own-property lookup only: `constructor`, `__proto__`, `toString` are not providers. */
+export const lookup = (map, key) => (typeof key === 'string' && Object.hasOwn(map, key) ? map[key] : undefined);
+
+/**
+ * Start: create a server-side state bound to the authenticated user and to this
+ * browser. Returns { status, body, cookie }; the handler must send `cookie` as
+ * Set-Cookie (it carries the browser-binding nonce) when it is present.
+ */
+export async function beginFlow({ family, provider, user, admin, scopesFor, buildUrl, now, secureCookie = true }) {
+  if (!Array.isArray(scopesFor(provider))) return { status: 400, body: { error: `Unknown provider: ${provider}` } };
+  // Misconfigured token encryption must fail before the user spends a consent.
   try {
-    state = await createOAuthState({ admin, userId: user.id, provider, family, now });
+    assertTokenConfig();
+  } catch {
+    return { status: 503, body: { error: 'Token encryption is misconfigured', hint: 'Check CONNECTOR_TOKEN_KEY' } };
+  }
+  let created;
+  try {
+    created = await createOAuthState({ admin, userId: user.id, provider, family, now });
   } catch {
     return {
       status: 503,
       body: { error: 'OAuth state store unavailable', hint: 'Apply supabase/connectors-hardening.sql' },
     };
   }
-  return { status: 200, body: { url: buildUrl(state) } };
+  return {
+    status: 200,
+    body: { url: buildUrl(created.state) },
+    cookie: setNonceCookie(created.state, created.nonce, { secure: secureCookie }),
+  };
 }
 
 /**
  * Callback: returns the redirect location. Identity and provider come only from
  * the consumed server-side state row, never from the URL.
  */
-export async function finishFlow({ family, query, admin, scopesFor, exchangeCode, getEmail, home, now, log = console }) {
+export async function finishFlow({ family, query, cookieHeader, admin, scopesFor, exchangeCode, getEmail, home, now, log = console }) {
   const to = (qs) => `${home}?${qs}`;
   if (query?.error) return to(`connector_error=${enc(safeCode(query.error))}`);
   if (!query?.code || !query?.state) return to('connector_error=missing_code');
 
-  const consumed = await consumeOAuthState({ admin, state: String(query.state), family, now });
+  // The state is only valid in the browser that started the flow (login-CSRF).
+  const state = String(query.state);
+  const nonce = readNonce(cookieHeader, state);
+  const consumed = await consumeOAuthState({ admin, state, nonce, family, now });
   if (!consumed.ok) return to(`connector_error=${consumed.reason}`);
   const { userId, provider } = consumed;
   const scopes = scopesFor(provider);
-  if (!scopes) return to('connector_error=invalid_state');
+  if (!Array.isArray(scopes)) return to('connector_error=invalid_state');
 
   let tokens;
   let email;
@@ -65,8 +85,10 @@ export async function finishFlow({ family, query, admin, scopesFor, exchangeCode
     if (same) refresh = existing.refresh_token;
   }
 
+  let sealing = false;
   let row;
   try {
+    sealing = assertTokenConfig().sealing;
     row = {
       user_id: userId,
       provider,
@@ -82,6 +104,8 @@ export async function finishFlow({ family, query, admin, scopesFor, exchangeCode
     log.error?.('token sealing failed:', e?.message);
     return to('connector_error=token_key_invalid');
   }
+
+  if (!sealing) log.warn?.('connector tokens are stored in plaintext (CONNECTOR_TOKEN_KEY inactive)');
 
   // F06: never report success without a confirmed write.
   const { error } = await admin.from('connectors').upsert(row, { onConflict: 'user_id,provider' });
@@ -117,13 +141,16 @@ export async function disconnectFlow({ admin, userId, provider, familyOf, google
   if (family !== 'google') return { status: 200, body: { ok: true, revoked: 'unsupported_provider' } };
   if (!row.account_email) return { status: 200, body: { ok: true, revoked: 'skipped_unknown_account' } };
 
+  // Same Google account => same grant, whatever the letter case of the address.
   const { data: others, error: othersError } = await admin
     .from('connectors')
-    .select('id')
+    .select('id, account_email')
     .eq('user_id', userId)
-    .eq('account_email', row.account_email)
     .in('provider', googleProviders);
-  if (othersError || (others && others.length > 0)) {
+  const sameAccount = (others || []).some(
+    (o) => String(o.account_email || '').toLowerCase() === String(row.account_email).toLowerCase(),
+  );
+  if (othersError || sameAccount) {
     return { status: 200, body: { ok: true, revoked: 'skipped_shared_grant' } };
   }
 

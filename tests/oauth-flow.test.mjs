@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { createOAuthState } from '../api/lib/oauthState.js';
-import { finishFlow, disconnectFlow } from '../api/lib/oauthFlow.js';
+import { createOAuthState, nonceCookieName } from '../api/lib/oauthState.js';
+import { finishFlow, disconnectFlow, beginFlow, lookup } from '../api/lib/oauthFlow.js';
 import { openToken, sealToken } from '../api/lib/tokenCrypto.js';
 import { makeAdmin } from './helpers/fakeAdmin.mjs';
 
@@ -25,14 +25,21 @@ function deps(admin, over = {}) {
     },
   };
 }
-const start = (admin, userId = 'u1', provider = 'gmail', family = 'google') => createOAuthState({ admin, userId, provider, family, now: T0 });
+// The browser that starts a flow keeps the nonce in an HttpOnly cookie; `fin` replays it like that browser would.
+const nonces = new Map();
+const start = async (admin, userId = 'u1', provider = 'gmail', family = 'google') => {
+  const { state, nonce } = await createOAuthState({ admin, userId, provider, family, now: T0 });
+  nonces.set(state, nonce);
+  return state;
+};
+const fin = (a) => finishFlow({ cookieHeader: `${nonceCookieName(a.query?.state)}=${nonces.get(a.query?.state)}`, ...a });
 const loc = (u) => new URL(u);
 
 test('happy path: tokens are saved for the user bound to the state and success is redirected', async () => {
   const admin = makeAdmin();
   const state = await start(admin);
   const { args } = deps(admin);
-  const to = await finishFlow({ ...args, query: { code: 'c', state } });
+  const to = await fin({ ...args, query: { code: 'c', state } });
   assert.equal(to, `${HOME}?connected=gmail`);
   const [row] = admin.tables.connectors;
   assert.equal(row.user_id, 'u1');
@@ -47,7 +54,7 @@ test('F01/F02: a forged legacy state naming a victim writes nothing and never ca
   const admin = makeAdmin();
   const { args, calls } = deps(admin);
   const forged = Buffer.from(JSON.stringify({ userId: 'victim', provider: 'gmail', t: T0 })).toString('base64url');
-  const to = await finishFlow({ ...args, query: { code: 'attacker-code', state: forged } });
+  const to = await fin({ ...args, query: { code: 'attacker-code', state: forged } });
   assert.equal(loc(to).searchParams.get('connector_error'), 'invalid_state');
   assert.equal(calls.exchange, 0);
   assert.equal(admin.tables.connectors.length, 0);
@@ -57,7 +64,7 @@ test('F02: identity comes from the row, an attacker cannot redirect tokens to an
   const admin = makeAdmin();
   const attackerState = await start(admin, 'attacker');
   const { args } = deps(admin);
-  await finishFlow({ ...args, query: { code: 'c', state: attackerState, userId: 'victim', user_id: 'victim', provider: 'google_drive' } });
+  await fin({ ...args, query: { code: 'c', state: attackerState, userId: 'victim', user_id: 'victim', provider: 'google_drive' } });
   assert.deepEqual(admin.tables.connectors.map((r) => [r.user_id, r.provider]), [['attacker', 'gmail']]);
 });
 
@@ -65,8 +72,8 @@ test('replay of a used state is rejected and writes nothing more', async () => {
   const admin = makeAdmin();
   const state = await start(admin);
   const { args, calls } = deps(admin);
-  await finishFlow({ ...args, query: { code: 'c', state } });
-  const to = await finishFlow({ ...args, query: { code: 'c2', state } });
+  await fin({ ...args, query: { code: 'c', state } });
+  const to = await fin({ ...args, query: { code: 'c2', state } });
   assert.equal(loc(to).searchParams.get('connector_error'), 'invalid_state');
   assert.equal(calls.exchange, 1);
   assert.equal(admin.tables.connectors.length, 1);
@@ -76,7 +83,7 @@ test('expired state is rejected before any token exchange', async () => {
   const admin = makeAdmin();
   const state = await start(admin);
   const { args, calls } = deps(admin, { now: T0 + 11 * 60_000 });
-  const to = await finishFlow({ ...args, query: { code: 'c', state } });
+  const to = await fin({ ...args, query: { code: 'c', state } });
   assert.equal(loc(to).searchParams.get('connector_error'), 'invalid_state');
   assert.equal(calls.exchange, 0);
 });
@@ -85,7 +92,7 @@ test('a Microsoft-family state is refused by the Google callback', async () => {
   const admin = makeAdmin();
   const state = await start(admin, 'u1', 'gmail', 'microsoft');
   const { args, calls } = deps(admin);
-  const to = await finishFlow({ ...args, query: { code: 'c', state } });
+  const to = await fin({ ...args, query: { code: 'c', state } });
   assert.equal(loc(to).searchParams.get('connector_error'), 'invalid_state');
   assert.equal(calls.exchange, 0);
 });
@@ -93,21 +100,21 @@ test('a Microsoft-family state is refused by the Google callback', async () => {
 test('provider error and missing parameters are handled without leaking raw input', async () => {
   const admin = makeAdmin();
   const { args } = deps(admin);
-  const e = await finishFlow({ ...args, query: { error: 'access_denied"><script>x' } });
+  const e = await fin({ ...args, query: { error: 'access_denied"><script>x' } });
   assert.equal(loc(e).searchParams.get('connector_error'), 'access_deniedscriptx');
-  assert.equal(loc(await finishFlow({ ...args, query: { state: 'x' } })).searchParams.get('connector_error'), 'missing_code');
-  assert.equal(loc(await finishFlow({ ...args, query: { code: 'x' } })).searchParams.get('connector_error'), 'missing_code');
+  assert.equal(loc(await fin({ ...args, query: { state: 'x' } })).searchParams.get('connector_error'), 'missing_code');
+  assert.equal(loc(await fin({ ...args, query: { code: 'x' } })).searchParams.get('connector_error'), 'missing_code');
 });
 
 test('exchange failure reports a fixed code (no provider message) and burns the state', async () => {
   const admin = makeAdmin();
   const state = await start(admin);
   const { args } = deps(admin, { exchangeCode: async () => { throw new Error('secret detail from provider'); } });
-  const to = await finishFlow({ ...args, query: { code: 'c', state } });
+  const to = await fin({ ...args, query: { code: 'c', state } });
   assert.equal(loc(to).searchParams.get('connector_error'), 'exchange_failed');
   assert.ok(!to.includes('secret'));
   assert.equal(admin.tables.connectors.length, 0);
-  const retry = await finishFlow({ ...deps(admin).args, query: { code: 'c', state } });
+  const retry = await fin({ ...deps(admin).args, query: { code: 'c', state } });
   assert.equal(loc(retry).searchParams.get('connector_error'), 'invalid_state');
 });
 
@@ -115,7 +122,7 @@ test('F06: a failed write is never reported as success', async () => {
   const admin = makeAdmin({ fail: { 'connectors.upsert': true } });
   const state = await start(admin);
   const { args } = deps(admin);
-  const to = await finishFlow({ ...args, query: { code: 'c', state } });
+  const to = await fin({ ...args, query: { code: 'c', state } });
   assert.equal(loc(to).searchParams.get('connector_error'), 'save_failed');
   assert.equal(loc(to).searchParams.get('connected'), null);
 });
@@ -123,7 +130,7 @@ test('F06: a failed write is never reported as success', async () => {
 test('F06: a failed read of the existing connector also fails closed', async () => {
   const admin = makeAdmin({ fail: { 'connectors.select': true } });
   const state = await start(admin);
-  const to = await finishFlow({ ...deps(admin).args, query: { code: 'c', state } });
+  const to = await fin({ ...deps(admin).args, query: { code: 'c', state } });
   assert.equal(loc(to).searchParams.get('connector_error'), 'save_failed');
 });
 
@@ -135,7 +142,7 @@ async function reconnect({ existingEmail, newEmail, newRefresh }) {
     getEmail: async () => newEmail,
     exchangeCode: async () => ({ access_token: 'AT-new', refresh_token: newRefresh, expires_in: 60 }),
   });
-  await finishFlow({ ...args, query: { code: 'c', state } });
+  await fin({ ...args, query: { code: 'c', state } });
   return admin.tables.connectors[0];
 }
 
@@ -155,7 +162,7 @@ test('F03: with a key configured, stored tokens are encrypted and bound to the r
   try {
     const admin = makeAdmin();
     const state = await start(admin);
-    await finishFlow({ ...deps(admin).args, query: { code: 'c', state } });
+    await fin({ ...deps(admin).args, query: { code: 'c', state } });
     const [row] = admin.tables.connectors;
     assert.match(row.access_token, /^enc:v1:/);
     assert.match(row.refresh_token, /^enc:v1:/);
@@ -170,22 +177,65 @@ test('a malformed encryption key fails closed instead of silently storing plaint
   try {
     const admin = makeAdmin();
     const state = await start(admin);
-    const to = await finishFlow({ ...deps(admin).args, query: { code: 'c', state } });
+    const to = await fin({ ...deps(admin).args, query: { code: 'c', state } });
     assert.equal(loc(to).searchParams.get('connector_error'), 'token_key_invalid');
     assert.equal(admin.tables.connectors.length, 0);
   } finally { delete process.env.CONNECTOR_TOKEN_KEY; }
 });
 
-test('callbacks no longer decode identity from the URL state', () => {
-  for (const f of ['google-callback.js', 'microsoft-callback.js']) {
-    const src = readFileSync(new URL(`../api/connectors/${f}`, import.meta.url), 'utf8');
-    assert.ok(!/JSON\.parse\(\s*Buffer\.from/.test(src), `${f} must not parse state as base64 JSON`);
-    assert.ok(!/userId\s*[,}]\s*=\s*state|const\s*\{\s*userId/.test(src), `${f} must not read userId from state`);
+test('login-CSRF: the callback finished from a browser without the starter\'s cookie writes nothing and burns nothing', async () => {
+  const admin = makeAdmin();
+  const attackerState = await start(admin, 'attacker');
+  const { args, calls } = deps(admin);
+  for (const cookieHeader of [undefined, '', 'other=1', `${nonceCookieName(attackerState)}=${'A'.repeat(43)}`]) {
+    const to = await finishFlow({ ...args, cookieHeader, query: { code: 'victim-consented-code', state: attackerState } });
+    assert.equal(loc(to).searchParams.get('connector_error'), 'invalid_state');
   }
-  for (const f of ['google-start.js', 'microsoft-start.js']) {
-    const src = readFileSync(new URL(`../api/connectors/${f}`, import.meta.url), 'utf8');
-    assert.ok(!/base64url/.test(src), `${f} must not build a client-decodable state`);
+  assert.equal(calls.exchange, 0, 'the victim\'s authorization code must never be exchanged');
+  assert.equal(admin.tables.connectors.length, 0);
+  const ok = await fin({ ...args, query: { code: 'c', state: attackerState } });
+  assert.equal(ok, `${HOME}?connected=gmail`, 'the legitimate browser can still finish');
+});
+
+test('a provider key that is an Object.prototype member is not a provider', async () => {
+  const admin = makeAdmin();
+  const SCOPE_MAP = { gmail: ['g'] };
+  for (const p of ['constructor', '__proto__', 'toString', 'hasOwnProperty']) {
+    const out = await beginFlow({ family: 'google', provider: p, user: { id: 'u1' }, admin, scopesFor: (k) => lookup(SCOPE_MAP, k), buildUrl: () => 'x' });
+    assert.equal(out.status, 400, p);
   }
+  assert.equal(admin.tables.oauth_states.length, 0);
+  assert.equal(lookup(SCOPE_MAP, 'gmail')[0], 'g');
+  assert.equal(lookup(SCOPE_MAP, undefined), undefined);
+});
+
+test('start fails before any consent when token encryption is misconfigured', async () => {
+  const admin = makeAdmin();
+  const base = { family: 'google', provider: 'gmail', user: { id: 'u1' }, admin, scopesFor: () => ['s'], buildUrl: () => 'https://x' };
+  for (const env of [{ CONNECTOR_TOKEN_KEY: 'garbage' }, { CONNECTOR_TOKEN_REQUIRE_KEY: '1' }]) {
+    Object.assign(process.env, env);
+    try {
+      const out = await beginFlow(base);
+      assert.equal(out.status, 503, JSON.stringify(env));
+      assert.equal(out.body.url, undefined);
+    } finally { for (const k of Object.keys(env)) delete process.env[k]; }
+  }
+  assert.equal(admin.tables.oauth_states.length, 0, 'no state is minted for a flow that cannot finish');
+});
+
+test('plaintext storage is logged as a warning, sealed storage is not', async () => {
+  const warns = [];
+  const log = { error() {}, warn: (m) => warns.push(m) };
+  const a1 = makeAdmin();
+  await fin({ ...deps(a1, { log }).args, query: { code: 'c', state: await start(a1) } });
+  assert.equal(warns.length, 1);
+  assert.ok(!/AT-new|RT-new/.test(warns[0]));
+  process.env.CONNECTOR_TOKEN_KEY = KEY.toString('base64');
+  try {
+    const a2 = makeAdmin();
+    await fin({ ...deps(a2, { log }).args, query: { code: 'c', state: await start(a2) } });
+    assert.equal(warns.length, 1, 'no new warning when sealing is active');
+  } finally { delete process.env.CONNECTOR_TOKEN_KEY; }
 });
 
 // ---- disconnect (F07)
@@ -279,4 +329,15 @@ test('F07: Microsoft has no token revocation endpoint: disconnect says so explic
 test('disconnecting a connector that does not exist is a no-op success', async () => {
   const d = dflow(makeAdmin());
   assert.deepEqual(await d.run('gmail'), { status: 200, body: { ok: true, revoked: 'none' } });
+});
+
+test('F07: the shared-grant check ignores letter case of the account address', async () => {
+  const admin = makeAdmin();
+  seed(admin, [
+    { user_id: 'u1', provider: 'gmail', account_email: 'A@x.com', access_token: 'AT1', refresh_token: 'RT1' },
+    { user_id: 'u1', provider: 'google_drive', account_email: 'a@X.com', access_token: 'AT2', refresh_token: 'RT2' },
+  ]);
+  const d = dflow(admin);
+  assert.equal((await d.run('gmail')).body.revoked, 'skipped_shared_grant');
+  assert.deepEqual(d.revoked, [], 'revoking would have killed the other connector\'s grant');
 });

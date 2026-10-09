@@ -49,3 +49,55 @@ test('key parsing: unset is legacy mode, wrong length is an error', () => {
   assert.equal(getTokenKey({ CONNECTOR_TOKEN_KEY: KEY.toString('base64') }).length, 32);
   assert.throws(() => getTokenKey({ CONNECTOR_TOKEN_KEY: Buffer.alloc(16).toString('base64') }), /32 bytes/);
 });
+
+// ---- review follow-ups: lazy key, rollback switch, required key
+import { assertTokenConfig, sealingDisabled } from '../api/lib/tokenCrypto.js';
+const withEnv = (env, fn) => {
+  const old = {};
+  for (const k of Object.keys(env)) { old[k] = process.env[k]; process.env[k] = env[k]; }
+  try { return fn(); } finally { for (const k of Object.keys(env)) { if (old[k] === undefined) delete process.env[k]; else process.env[k] = old[k]; } }
+};
+const CTX2 = { userId: 'u1', provider: 'gmail', column: 'access_token' };
+const GOOD = Buffer.alloc(32, 9).toString('base64');
+
+test('a malformed key never breaks reading legacy plaintext rows (key is resolved lazily)', () => {
+  withEnv({ CONNECTOR_TOKEN_KEY: 'garbage' }, () => {
+    assert.equal(openToken('plain-token', CTX2), 'plain-token');
+    assert.equal(openToken(null, CTX2), null);
+    assert.equal(sealToken(null, CTX2), null);
+    assert.throws(() => sealToken('x', CTX2), /32 bytes/);
+    assert.throws(() => openToken('enc:v1:AAAA', CTX2), /32 bytes/);
+  });
+});
+
+test('CONNECTOR_TOKEN_SEAL=off stops writing sealed values but still reads them (rollback step)', () => {
+  const sealed = withEnv({ CONNECTOR_TOKEN_KEY: GOOD }, () => sealToken('AT', CTX2));
+  assert.match(sealed, /^enc:v1:/);
+  withEnv({ CONNECTOR_TOKEN_KEY: GOOD, CONNECTOR_TOKEN_SEAL: 'off' }, () => {
+    assert.equal(sealingDisabled(), true);
+    assert.equal(sealToken('AT-2', CTX2), 'AT-2', 'new values stay plaintext');
+    assert.equal(openToken(sealed, CTX2), 'AT', 'existing sealed values stay readable');
+    assert.equal(assertTokenConfig().sealing, false);
+  });
+  withEnv({ CONNECTOR_TOKEN_KEY: GOOD }, () => assert.equal(sealingDisabled(), false));
+  for (const v of ['0', 'false', 'No', 'OFF']) withEnv({ CONNECTOR_TOKEN_SEAL: v }, () => assert.equal(sealingDisabled(), true, v));
+  for (const v of ['', 'on', '1', 'yes', undefined]) withEnv({ CONNECTOR_TOKEN_SEAL: v ?? '' }, () => assert.equal(sealingDisabled(), false, String(v)));
+});
+
+test('explicitly passing a key always seals (migration script), whatever the runtime switch says', () => {
+  withEnv({ CONNECTOR_TOKEN_SEAL: 'off' }, () => {
+    assert.match(sealToken('AT', CTX2, Buffer.alloc(32, 9)), /^enc:v1:/);
+  });
+});
+
+test('CONNECTOR_TOKEN_REQUIRE_KEY=1: a missing key is an error instead of silent plaintext', () => {
+  withEnv({ CONNECTOR_TOKEN_REQUIRE_KEY: '1' }, () => {
+    assert.throws(() => assertTokenConfig(), /token_key_required/);
+    assert.throws(() => sealToken('AT', CTX2), /token_key_required/);
+    assert.equal(openToken('legacy', CTX2), 'legacy', 'reading legacy rows still works');
+  });
+  withEnv({ CONNECTOR_TOKEN_REQUIRE_KEY: '1', CONNECTOR_TOKEN_KEY: GOOD }, () => {
+    assert.deepEqual(assertTokenConfig(), { sealing: true });
+  });
+  assert.deepEqual(assertTokenConfig({}), { sealing: false }, 'default stays legacy-compatible');
+});

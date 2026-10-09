@@ -1,29 +1,20 @@
-import {
-  MS_PROVIDER_SCOPES,
-  getMicrosoftConfig,
-  exchangeMicrosoftCode,
-  getMicrosoftEmail,
-} from '../lib/microsoft.js';
+import { MS_PROVIDER_SCOPES, getMicrosoftConfig, exchangeMicrosoftCode, getMicrosoftEmail } from '../lib/microsoft.js';
 import { getAdminClient } from '../lib/supabaseAdmin.js';
-import { finishFlow } from '../lib/oauthFlow.js';
+import { makeCallbackHandler } from '../lib/connectorHandlers.js';
 
-export default async function handler(req, res) {
-  const home = (process.env.APP_URL || '').replace(/\/$/, '') || '/';
-  try {
+export default makeCallbackHandler({
+  family: 'microsoft',
+  scopes: MS_PROVIDER_SCOPES,
+  getAdmin: getAdminClient,
+  getEmail: getMicrosoftEmail,
+  configure: () => {
     const { clientId, clientSecret, appUrl, tenant } = getMicrosoftConfig();
-    const redirectUri = `${appUrl}/api/connectors/microsoft-callback`;
-    const location = await finishFlow({
-      family: 'microsoft',
-      query: req.query || {},
-      admin: getAdminClient(),
-      scopesFor: (p) => MS_PROVIDER_SCOPES[p],
-      exchangeCode: (code) => exchangeMicrosoftCode({ clientId, clientSecret, code, redirectUri, tenant }),
-      getEmail: getMicrosoftEmail,
-      home,
-    });
-    return res.redirect(location);
-  } catch (e) {
-    console.error('microsoft-callback error:', e);
-    return res.redirect(`${home}?connector_error=callback_failed`);
-  }
-}
+    return {
+      clientId, clientSecret, appUrl, tenant,
+      home: (process.env.APP_URL || '').replace(/\/$/, '') || '/',
+      redirectUri: `${appUrl}/api/connectors/microsoft-callback`,
+    };
+  },
+  exchange: ({ clientId, clientSecret, redirectUri, tenant }, code) =>
+    exchangeMicrosoftCode({ clientId, clientSecret, code, redirectUri, tenant }),
+});

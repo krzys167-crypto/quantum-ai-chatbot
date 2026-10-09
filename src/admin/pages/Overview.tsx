@@ -13,9 +13,11 @@ type Stats = {
   connectors: number | null
 }
 
-async function countTable(table: string, filter?: { column: string; value: string }): Promise<number | null> {
+// `column` defaults to '*'. Tables with column-level grants (connectors: tokens are not readable by
+// clients) must be counted on an allowed column, because '*' expands to every column.
+async function countTable(table: string, filter?: { column: string; value: string }, column = '*'): Promise<number | null> {
   try {
-    let q = supabase.from(table).select('*', { count: 'exact', head: true })
+    let q = supabase.from(table).select(column, { count: 'exact', head: true })
     if (filter) q = q.eq(filter.column, filter.value)
     const { count, error } = await q
     if (error) {
@@ -67,7 +69,7 @@ export default function Overview({ dark }: Props) {
         countTable('profiles'),
         countTable('conversations'),
         countMessagesToday(),
-        countTable('connectors', { column: 'status', value: 'connected' }),
+        countTable('connectors', { column: 'status', value: 'connected' }, 'id'),
       ])
       setStats({ users, conversations, messagesToday, connectors })
       setUpdatedAt(new Date())
