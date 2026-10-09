@@ -1,4 +1,5 @@
-// Gate for irreversible Gmail actions, called from runTool().
+// Gate for irreversible actions with third-party effects (send / reply / forward e-mail, calendar events with
+// guests), called from runTool().
 //
 //   APPROVAL_MODE unset / "server"  -> the model can NEVER send: the call is turned into a pending approval and
 //                                      a Confirm card with the exact content is shown to the signed-in user
@@ -6,7 +7,7 @@
 //   APPROVAL_MODE = "legacy"        -> the old behaviour: the MODEL-supplied `user_confirmed === true` (F09: this is
 //                                      not evidence of user consent). Kept only as an explicit, logged emergency
 //                                      switch; it is not the default.
-import { APPROVABLE_ACTIONS, createPending, normalizeArgs } from './approvals.js';
+import { APPROVABLE_ACTIONS, attendeeEntries, createPending, normalizeArgs } from './approvals.js';
 
 export function approvalMode(env = process.env) {
   const raw = String(env.APPROVAL_MODE || 'server').trim().toLowerCase();
@@ -20,7 +21,14 @@ const LEGACY_TEXT = {
 };
 
 const PENDING_TEXT = (action) =>
-  `NOT SENT YET. The user has been shown a Confirm card with exactly these fields for ${action}. It is sent only when the user presses Confirm in the app; you cannot confirm for them and must not call this tool again for the same content. Tell the user briefly to review the card and press Confirm (or Cancel).`;
+  action === 'create_calendar_event'
+    ? 'NOT CREATED YET. The user has been shown a Confirm card with exactly these event details and guests. The event is created, and the guests are invited, only when the user presses Confirm in the app; you cannot confirm for them and must not call this tool again for the same content. Tell the user briefly to review the card and press Confirm (or Cancel).'
+    : `NOT SENT YET. The user has been shown a Confirm card with exactly these fields for ${action}. It is sent only when the user presses Confirm in the app; you cannot confirm for them and must not call this tool again for the same content. Tell the user briefly to review the card and press Confirm (or Cancel).`;
+
+const NO_CARD_TEXT = (name) =>
+  name === 'create_calendar_event'
+    ? `${name} blocked: this request cannot show a Confirm card (non-interactive mode). Create the event without guests, or tell the user to invite them themselves.`
+    : `${name} blocked: this request cannot show a Confirm card (non-interactive mode). Create a draft instead and tell the user to send it themselves.`;
 
 const blocked = (content) => ({ content, is_error: true });
 
@@ -30,7 +38,8 @@ const REASON_TEXT = {
 };
 
 /**
- * Returns null when the action may proceed right now (legacy mode with the model's flag), otherwise
+ * Returns null when the action may proceed right now (legacy mode with the model's flag, or a calendar event without
+ * guests, which has no third-party effect), otherwise
  * { content, is_error } to hand back to the model as the tool result.
  *   ctx.admin               Supabase service client
  *   ctx.onApprovalRequired  (card) => void : pushes the Confirm card to the user's open stream; absent => cannot confirm
@@ -38,12 +47,18 @@ const REASON_TEXT = {
  */
 export async function gateIrreversible(name, input, user, ctx = {}) {
   if (!APPROVABLE_ACTIONS.includes(name)) return null;
+  // An event for the user alone has no third-party effect: it stays immediate. Guests make it approvable.
+  if (name === 'create_calendar_event' && attendeeEntries(input).length === 0) return null;
   const env = ctx.env || process.env;
   const log = ctx.log || console;
   const mode = approvalMode(env);
   if (mode === 'invalid') return blocked(`${name} blocked: APPROVAL_MODE must be "server" or "legacy".`);
 
   if (mode === 'legacy') {
+    if (name === 'create_calendar_event') {
+      log.warn?.(`[approval] APPROVAL_MODE=legacy: ${name} with guests released without approval (F09 open)`);
+      return null;
+    }
     if (input && input.user_confirmed === true) {
       log.warn?.(`[approval] APPROVAL_MODE=legacy: ${name} released on the model's own flag (F09 open)`);
       return null;
@@ -53,7 +68,7 @@ export async function gateIrreversible(name, input, user, ctx = {}) {
 
   if (!user?.id) return blocked(`${name} blocked: no signed-in user.`);
   if (typeof ctx.onApprovalRequired !== 'function') {
-    return blocked(`${name} blocked: this request cannot show a Confirm card (non-interactive mode). Create a draft instead and tell the user to send it themselves.`);
+    return blocked(NO_CARD_TEXT(name));
   }
   let pending;
   try {

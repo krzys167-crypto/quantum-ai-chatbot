@@ -15,7 +15,7 @@ test('normalizeArgs keeps exactly the fields of the action and drops everything 
   assert.deepEqual(normalizeArgs('reply_email', { message_id: 'm1', body: 'ok', reply_all: 'yes' }), { message_id: 'm1', reply_all: false, cc: '', bcc: '', body: 'ok' });
   assert.equal(normalizeArgs('reply_email', { message_id: 'm1', body: 'ok', reply_all: true }).reply_all, true);
   assert.deepEqual(normalizeArgs('forward_email', { message_id: 'm1', to: 'x@y.z' }), { message_id: 'm1', to: 'x@y.z', cc: '', bcc: '', body: '' });
-  assert.deepEqual(APPROVABLE_ACTIONS.sort(), ['forward_email', 'reply_email', 'send_email']);
+  assert.deepEqual([...APPROVABLE_ACTIONS].sort(), ['create_calendar_event', 'forward_email', 'reply_email', 'send_email']);
 });
 
 test('normalizeArgs rejects missing required fields, oversize values and non-approvable actions', () => {

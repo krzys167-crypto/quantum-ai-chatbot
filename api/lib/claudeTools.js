@@ -296,7 +296,7 @@ export const CALENDAR_TOOL = {
 
 export const CREATE_EVENT_TOOL = {
   name: 'create_calendar_event',
-  description: 'Create a Google Calendar event. Confirm first if attendees are included.',
+  description: 'Create a Google Calendar event. Without attendees it is created immediately. With attendees nothing is created by this call: the app shows the user a Confirm card with the exact event and guests, and the event exists only after the user presses Confirm. Never say guests were invited until a tool result says so.',
   input_schema: {
     type: 'object',
     properties: {
@@ -531,18 +531,42 @@ async function resolveProjectByName(admin, userId, name) {
 
 /** Best-effort context for a Confirm card: who wrote the message that is being replied to / forwarded. */
 async function describeOriginalMessage(user, name, args) {
-  if (name === 'send_email') return null;
+  if (name === 'send_email' || name === 'create_calendar_event') return null;
   const token = await getValidToken(user.id, 'gmail');
   if (!token) return null;
   const m = await getGmailMessage(token, String(args.message_id || ''));
   return { original: { from: m.from || '', subject: m.subject || '', date: m.date || '' } };
 }
 
+/** The Calendar call. Reached directly for an event without guests, or through performIrreversible() after Confirm. */
+async function createEventFor(user, input, id = null) {
+  const token = await getValidToken(user.id, 'google_calendar');
+  if (!token)
+    return {
+      type: 'tool_result',
+      tool_use_id: id,
+      content: 'Google Calendar is not connected. Reconnect with write access.',
+      is_error: true,
+    };
+  const result = await createCalendarEvent(token, {
+    summary: String(input.summary || ''),
+    description: input.description ? String(input.description) : undefined,
+    location: input.location ? String(input.location) : undefined,
+    start: String(input.start || ''),
+    end: input.end ? String(input.end) : undefined,
+    allDay: !!input.all_day,
+    timeZone: input.time_zone ? String(input.time_zone) : undefined,
+    attendees: Array.isArray(input.attendees) ? input.attendees : undefined,
+  });
+  return { type: 'tool_result', tool_use_id: id, content: JSON.stringify(result) };
+}
+
 /**
- * The actual Gmail call for send_email / reply_email / forward_email. Reached only from the approval endpoint
- * (the user pressed Confirm on the exact stored arguments) or from APPROVAL_MODE=legacy.
+ * The actual call for send_email / reply_email / forward_email / create_calendar_event (with guests). Reached only
+ * from the approval endpoint (the user pressed Confirm on the exact stored arguments) or from APPROVAL_MODE=legacy.
  */
 export async function performIrreversible(name, input, user, id = null) {
+  if (name === 'create_calendar_event') return createEventFor(user, input, id);
   const token = await getValidToken(user.id, 'gmail');
   if (!token) return gmailNotConnected(id);
   if (name === 'send_email') {
@@ -843,25 +867,13 @@ export async function runTool(block, user, context = {}) {
       };
     }
     if (name === 'create_calendar_event' && user) {
-      const token = await getValidToken(user.id, 'google_calendar');
-      if (!token)
-        return {
-          type: 'tool_result',
-          tool_use_id: id,
-          content: 'Google Calendar is not connected. Reconnect with write access.',
-          is_error: true,
-        };
-      const result = await createCalendarEvent(token, {
-        summary: String(input.summary || ''),
-        description: input.description ? String(input.description) : undefined,
-        location: input.location ? String(input.location) : undefined,
-        start: String(input.start || ''),
-        end: input.end ? String(input.end) : undefined,
-        allDay: !!input.all_day,
-        timeZone: input.time_zone ? String(input.time_zone) : undefined,
-        attendees: Array.isArray(input.attendees) ? input.attendees : undefined,
+      // F09: with guests the model can never create it. In server mode it only files a pending approval.
+      const gate = await gateIrreversible(name, input, user, {
+        get admin() { return context.admin || getAdminClient(); }, // only needed (and created) when guests make it approvable
+        onApprovalRequired: context.onApprovalRequired,
       });
-      return { type: 'tool_result', tool_use_id: id, content: JSON.stringify(result) };
+      if (gate) return { type: 'tool_result', tool_use_id: id, is_error: gate.is_error, content: gate.content };
+      return createEventFor(user, input, id); // no guests, or APPROVAL_MODE=legacy
     }
     if (name === 'search_outlook' && user) {
       const token = await getValidMicrosoftToken(user.id, 'outlook');

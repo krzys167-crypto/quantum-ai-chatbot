@@ -1,16 +1,16 @@
 import { useEffect, useState } from 'react'
 import { Check, Loader2, Mail, ShieldCheck, X } from 'lucide-react'
 
-// F09: the assistant can never send, reply or forward on its own. When it asks to, the server stores the exact
-// content and streams it here as an "approval_required" event. Nothing leaves the account until the signed-in
-// user presses Confirm on this card; the server then sends the STORED content (this component only sends the id).
+// F09: the assistant can never send, reply, forward or invite guests on its own. When it asks to, the server stores
+// the exact content and streams it here as an "approval_required" event. Nothing leaves the account until the
+// signed-in user presses Confirm on this card; the server then executes the STORED content (this component only sends the id).
 
-export type ApprovalAction = 'send_email' | 'reply_email' | 'forward_email'
+export type ApprovalAction = 'send_email' | 'reply_email' | 'forward_email' | 'create_calendar_event'
 
 export interface ApprovalCard {
   id: string
   action: ApprovalAction
-  fields: Record<string, string | boolean>
+  fields: Record<string, string | boolean | string[]>
   context?: { original?: { from?: string; subject?: string; date?: string } } | null
   expires_at: string
 }
@@ -27,7 +27,20 @@ export function addApprovalCard(list: ApprovalCardState[], card: ApprovalCard): 
   return [...list, { ...card, status: 'pending' }]
 }
 
-const TITLE: Record<ApprovalAction, string> = { send_email: 'Send this email?', reply_email: 'Send this reply?', forward_email: 'Forward this message?' }
+const TITLE: Record<ApprovalAction, string> = {
+  send_email: 'Send this email?',
+  reply_email: 'Send this reply?',
+  forward_email: 'Forward this message?',
+  create_calendar_event: 'Create this event and invite the guests?',
+}
+
+const text = (v: unknown) => (Array.isArray(v) ? v.join(', ') : String(v ?? ''))
+
+function whenText(f: ApprovalCard['fields']) {
+  const start = text(f.start)
+  const end = text(f.end)
+  return [end ? `${start} - ${end}` : start, f.all_day === true ? 'all day' : '', text(f.time_zone)].filter(Boolean).join(' · ')
+}
 
 function Row({ label, value, dark }: { label: string; value: string; dark: boolean }) {
   if (!value) return null
@@ -71,10 +84,12 @@ export default function ApprovalTray({ cards, setCards, accessToken, dark }: Pro
         body: JSON.stringify({ id: card.id, decision }),
       })
       const data = await res.json().catch(() => ({}))
-      if (res.ok && data?.ok) patch(card.id, { status: data.status === 'sent' ? 'sent' : 'cancelled' })
-      else patch(card.id, { status: res.status === 410 ? 'expired' : 'failed', message: String(data?.error || 'The request failed. Nothing was sent.') })
+      if (res.ok && data?.ok) patch(card.id, { status: data.status === 'sent' || data.status === 'created' ? 'sent' : 'cancelled' })
+      else patch(card.id, { status: res.status === 410 ? 'expired' : 'failed', message: String(data?.error || 'The request failed. Nothing was done.') })
     } catch {
-      patch(card.id, { status: 'failed', message: 'Could not reach the server. It may or may not have been sent: check your Sent folder before asking again.' })
+      patch(card.id, { status: 'failed', message: card.action === 'create_calendar_event'
+          ? 'Could not reach the server. The event may or may not have been created: check your calendar before asking again.'
+          : 'Could not reach the server. It may or may not have been sent: check your Sent folder before asking again.' })
     }
   }
 
@@ -89,6 +104,8 @@ export default function ApprovalTray({ cards, setCards, accessToken, dark }: Pro
         const open = c.status === 'pending' || c.status === 'working'
         const timedOut = c.status === 'pending' && left === 0
         const orig = c.context?.original
+        const isEvent = c.action === 'create_calendar_event'
+        const bodyText = text(isEvent ? f.description : f.body)
         return (
           <section key={c.id} role="group" aria-label={TITLE[c.action]} data-testid="approval-card" data-status={c.status}
             className={'mx-auto w-full max-w-3xl rounded-2xl border p-3.5 ' + box}>
@@ -105,15 +122,19 @@ export default function ApprovalTray({ cards, setCards, accessToken, dark }: Pro
               {orig && (
                 <Row dark={dark} label={c.action === 'forward_email' ? 'Message' : 'Replying'} value={[orig.from, orig.subject].filter(Boolean).join(' - ')} />
               )}
-              {c.action !== 'reply_email' && <Row dark={dark} label="To" value={String(f.to ?? '')} />}
+              {isEvent && <Row dark={dark} label="Event" value={text(f.summary)} />}
+              {isEvent && <Row dark={dark} label="When" value={whenText(f)} />}
+              {isEvent && <Row dark={dark} label="Where" value={text(f.location)} />}
+              {isEvent && <Row dark={dark} label="Guests" value={text(f.attendees)} />}
+              {!isEvent && c.action !== 'reply_email' && <Row dark={dark} label="To" value={text(f.to)} />}
               {c.action === 'reply_email' && <Row dark={dark} label="Mode" value={f.reply_all === true ? 'Reply to all' : 'Reply to sender'} />}
-              <Row dark={dark} label="Cc" value={String(f.cc ?? '')} />
-              <Row dark={dark} label="Bcc" value={String(f.bcc ?? '')} />
-              {c.action === 'send_email' && <Row dark={dark} label="Subject" value={String(f.subject ?? '')} />}
+              {!isEvent && <Row dark={dark} label="Cc" value={text(f.cc)} />}
+              {!isEvent && <Row dark={dark} label="Bcc" value={text(f.bcc)} />}
+              {c.action === 'send_email' && <Row dark={dark} label="Subject" value={text(f.subject)} />}
             </div>
-            {String(f.body ?? '') !== '' && (
+            {bodyText !== '' && (
               <pre data-testid="approval-body" className={'mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-xl p-2.5 text-[13px] leading-5 font-sans ' + (dark ? 'bg-black/30' : 'bg-slate-50')}>
-                {String(f.body)}
+                {bodyText}
               </pre>
             )}
             {open ? (
@@ -129,13 +150,13 @@ export default function ApprovalTray({ cards, setCards, accessToken, dark }: Pro
                   Cancel
                 </button>
                 <span className={'text-[12px] ' + (dark ? 'text-slate-400' : 'text-slate-500')}>
-                  {timedOut ? 'Expired. Ask the assistant to prepare it again.' : `Nothing is sent until you confirm. Expires in ${Math.floor(left / 60000)}:${String(Math.floor((left % 60000) / 1000)).padStart(2, '0')}`}
+                  {timedOut ? 'Expired. Ask the assistant to prepare it again.' : `${isEvent ? 'Nothing is created or shared until you confirm.' : 'Nothing is sent until you confirm.'} Expires in ${Math.floor(left / 60000)}:${String(Math.floor((left % 60000) / 1000)).padStart(2, '0')}`}
                 </span>
               </div>
             ) : (
               <p role="status" className={'mt-3 flex items-center gap-1.5 text-[13px] ' + (c.status === 'sent' ? 'text-emerald-500' : c.status === 'cancelled' ? (dark ? 'text-slate-400' : 'text-slate-500') : 'text-amber-500')}>
                 {c.status === 'sent' && <Check className="w-4 h-4" />}
-                {c.status === 'sent' ? 'Sent.' : c.status === 'cancelled' ? 'Cancelled. Nothing was sent.' : c.message || 'This request is no longer valid.'}
+                {c.status === 'sent' ? (isEvent ? 'Event created.' : 'Sent.') : c.status === 'cancelled' ? (isEvent ? 'Cancelled. Nothing was created.' : 'Cancelled. Nothing was sent.') : c.message || 'This request is no longer valid.'}
               </p>
             )}
           </section>

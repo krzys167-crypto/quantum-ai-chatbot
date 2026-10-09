@@ -6,9 +6,13 @@ import { decidePending, DECISION_MESSAGES } from './approvals.js';
 
 const STATUS = { not_found: 404, expired: 410, corrupt: 409, store_unavailable: 503 };
 
-function safeFailure(e) {
+const isCalendar = (action) => action === 'create_calendar_event';
+
+function safeFailure(e, action) {
   const code = /\b([45]\d\d)\b/.exec(String(e?.message || ''))?.[1];
-  return code ? `Gmail refused the request (HTTP ${code}). Nothing was sent.` : 'The request to Gmail failed. Nothing was sent.';
+  const who = isCalendar(action) ? 'Google Calendar' : 'Gmail';
+  const nothing = isCalendar(action) ? 'Nothing was created.' : 'Nothing was sent.';
+  return code ? `${who} refused the request (HTTP ${code}). ${nothing}` : `The request to ${who} failed. ${nothing}`;
 }
 
 export function makeApproveHandler({ getUser, getAdmin, perform, allow = () => true, log = console, now = () => Date.now() }) {
@@ -39,16 +43,16 @@ export function makeApproveHandler({ getUser, getAdmin, perform, allow = () => t
       try {
         out = await perform(d.action, d.args, user);
       } catch (e) {
-        log.error?.('approved action failed:', safeFailure(e)); // never the raw provider text: it can echo the message
+        log.error?.('approved action failed:', safeFailure(e, d.action)); // never the raw provider text: it can echo the message
         log.info?.(JSON.stringify({ evt: 'approval_failed', user: user.id, action: d.action, digest: d.digest }));
-        return res.status(502).json({ ok: false, status: 'failed', action: d.action, error: safeFailure(e) });
+        return res.status(502).json({ ok: false, status: 'failed', action: d.action, error: safeFailure(e, d.action) });
       }
       if (out?.is_error) {
         log.info?.(JSON.stringify({ evt: 'approval_failed', user: user.id, action: d.action, digest: d.digest }));
-        return res.status(502).json({ ok: false, status: 'failed', action: d.action, error: 'Gmail is not connected for this account. Nothing was sent.' });
+        return res.status(502).json({ ok: false, status: 'failed', action: d.action, error: isCalendar(d.action) ? 'Google Calendar is not connected for this account. Nothing was created.' : 'Gmail is not connected for this account. Nothing was sent.' });
       }
       log.info?.(JSON.stringify({ evt: 'approval_executed', user: user.id, action: d.action, digest: d.digest }));
-      return res.status(200).json({ ok: true, status: 'sent', action: d.action });
+      return res.status(200).json({ ok: true, status: isCalendar(d.action) ? 'created' : 'sent', action: d.action });
     } catch (e) {
       log.error?.('approve-action error:', e?.message);
       return res.status(500).json({ error: 'approval is not available' });

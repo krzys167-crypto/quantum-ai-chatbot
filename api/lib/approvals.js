@@ -1,4 +1,5 @@
-// Server-held approvals for irreversible Gmail actions (audit finding F09).
+// Server-held approvals for irreversible actions with third-party effects (audit finding F09): Gmail send / reply /
+// forward, and Google Calendar events that invite guests.
 //
 // Problem: `user_confirmed` is an argument the MODEL supplies, so checking it proves nothing about the user.
 //
@@ -19,14 +20,48 @@ const FIELDS = {
   send_email: ['to', 'cc', 'bcc', 'subject', 'body'],
   reply_email: ['message_id', 'reply_all', 'cc', 'bcc', 'body'],
   forward_email: ['message_id', 'to', 'cc', 'bcc', 'body'],
+  create_calendar_event: ['summary', 'start', 'end', 'all_day', 'time_zone', 'location', 'description', 'attendees'],
 };
-const REQUIRED = { send_email: ['to', 'body'], reply_email: ['message_id', 'body'], forward_email: ['message_id', 'to'] };
-const MAX_LEN = { to: 2000, cc: 2000, bcc: 2000, subject: 998, body: 200_000, message_id: 128 };
+const BOOL_FIELDS = new Set(['reply_all', 'all_day']); // true only for the boolean true, never for a truthy string
+const LIST_FIELDS = new Set(['attendees']); // canonical form: unique, trimmed, lower-case e-mail addresses
+const REQUIRED = {
+  send_email: ['to', 'body'],
+  reply_email: ['message_id', 'body'],
+  forward_email: ['message_id', 'to'],
+  create_calendar_event: ['summary', 'start', 'attendees'],
+};
+const MAX_LEN = {
+  to: 2000, cc: 2000, bcc: 2000, subject: 998, body: 200_000, message_id: 128,
+  summary: 1024, start: 64, end: 64, time_zone: 64, location: 1024, description: 8000,
+};
+const DATE_FIELDS = ['start', 'end']; // must parse, so a bad value is refused now and not after the user pressed Confirm
+export const MAX_ATTENDEES = 20;
+const EMAIL_RE = /^[^\s@<>(),;:"\\]+@[^\s@<>(),;:"\\]+\.[^\s@<>(),;:"\\]+$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export const APPROVABLE_ACTIONS = Object.keys(FIELDS);
 
 const fail = (code, message) => Object.assign(new Error(message || code), { code });
+
+/**
+ * The guests a create_calendar_event call would really invite: exactly what createCalendarEvent() keeps (an array,
+ * strings turned into {email}, entries without an email dropped). The gate and the executor must agree on this.
+ */
+export function attendeeEntries(input) {
+  if (!Array.isArray(input?.attendees)) return [];
+  return input.attendees.map((a) => (typeof a === 'string' ? { email: a } : a)).filter((a) => a?.email);
+}
+
+function normalizeAttendees(input) {
+  const seen = new Set();
+  for (const entry of attendeeEntries(input)) {
+    const email = String(entry.email).trim().toLowerCase();
+    if (email.length > 254 || !EMAIL_RE.test(email)) throw fail('invalid_args', 'attendees contains an invalid e-mail address');
+    seen.add(email);
+  }
+  if (seen.size > MAX_ATTENDEES) throw fail('invalid_args', `attendees has more than ${MAX_ATTENDEES} addresses`);
+  return [...seen];
+}
 
 /** Canonical, validated arguments: exactly what is shown, stored and executed. Throws {code:'invalid_args'|'not_approvable'}. */
 export function normalizeArgs(action, args) {
@@ -34,12 +69,20 @@ export function normalizeArgs(action, args) {
   if (!fields) throw fail('not_approvable', `action is not approvable: ${String(action)}`);
   const a = args && typeof args === 'object' ? args : {};
   const out = {};
-  for (const f of fields) out[f] = f === 'reply_all' ? a[f] === true : String(a[f] ?? '');
+  for (const f of fields) {
+    if (BOOL_FIELDS.has(f)) out[f] = a[f] === true;
+    else if (LIST_FIELDS.has(f)) out[f] = normalizeAttendees(a);
+    else out[f] = String(a[f] ?? '');
+  }
   for (const f of REQUIRED[action]) {
-    if (!out[f].trim()) throw fail('invalid_args', `${f} is required`);
+    const v = out[f];
+    if (Array.isArray(v) ? v.length === 0 : !v.trim()) throw fail('invalid_args', `${f} is required`);
   }
   for (const f of fields) {
-    if (f !== 'reply_all' && out[f].length > MAX_LEN[f]) throw fail('invalid_args', `${f} is too long`);
+    if (typeof out[f] === 'string' && out[f].length > MAX_LEN[f]) throw fail('invalid_args', `${f} is too long`);
+  }
+  for (const f of DATE_FIELDS) {
+    if (fields.includes(f) && out[f] && !Number.isFinite(Date.parse(out[f]))) throw fail('invalid_args', `${f} is not a valid date`);
   }
   return out;
 }

@@ -38,3 +38,26 @@ test('the compressed front-end source renders the tray and listens for approval_
   assert.match(comp, /body: JSON\.stringify\(\{ id: card\.id, decision \}\)/);
   assert.ok(!/dangerouslySetInnerHTML|innerHTML/.test(comp), 'the e-mail body is rendered as text only');
 });
+
+test('the system prompt tells the model that guests need the Confirm card and never to claim an invitation without a tool result', () => {
+  const src = read('api/chat.js');
+  assert.match(src, /creating a calendar event with guests never happen from your call/);
+  assert.match(src, /Never say an email was sent or guests were invited unless a tool result says so/);
+  assert.ok(!/only send_email with user_confirmed=true after they say yes/.test(src), 'the old model-held confirmation instruction is gone');
+});
+
+test('runTool gates create_calendar_event and the executor is shared with the approval endpoint', () => {
+  const src = read('api/lib/claudeTools.js');
+  assert.match(src, /if \(name === 'create_calendar_event' && user\) \{[\s\S]*?gateIrreversible\(name, input, user, \{/);
+  assert.match(src, /if \(name === 'create_calendar_event'\) return createEventFor\(user, input, id\);/);
+  assert.equal((src.match(/createCalendarEvent\(token,/g) || []).length, 1, 'one single call site for the Calendar API');
+});
+
+test('the SQL constraint and the code list the same approvable actions', async () => {
+  const { APPROVABLE_ACTIONS } = await import('../api/lib/approvals.js');
+  const sql = read('supabase/approval-requests.sql');
+  const m = /approval_requests_action_check\s+check \(action in \(([^)]*)\)\)/.exec(sql);
+  assert.ok(m, 'named check constraint present');
+  const listed = [...m[1].matchAll(/'([a-z_]+)'/g)].map((x) => x[1]).sort();
+  assert.deepEqual(listed, [...APPROVABLE_ACTIONS].sort());
+});
